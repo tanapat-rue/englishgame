@@ -33,6 +33,34 @@ export default {
       return Response.json({ roomId }, { headers: corsHeaders });
     }
 
+    // Route: GET /api/turn-credentials — short-lived TURN credentials for WebRTC
+    if (url.pathname === '/api/turn-credentials') {
+      if (!env.TURN_KEY_ID || !env.TURN_API_TOKEN) {
+        // No TURN configured — return empty so client falls back to STUN only
+        return Response.json({ iceServers: [] }, { headers: corsHeaders });
+      }
+      try {
+        const resp = await fetch(
+          `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${env.TURN_API_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ ttl: 86400 }),
+          }
+        );
+        if (!resp.ok) throw new Error(`TURN API ${resp.status}`);
+        const data = await resp.json() as { iceServers: unknown[] };
+        return Response.json(data, { headers: corsHeaders });
+      } catch (err) {
+        // Don't break the app if TURN fetch fails — client will use STUN only
+        console.error('TURN credential fetch failed:', err);
+        return Response.json({ iceServers: [] }, { headers: corsHeaders });
+      }
+    }
+
     // Route: GET /api/health
     if (url.pathname === '/api/health') {
       return Response.json({ ok: true }, { headers: corsHeaders });

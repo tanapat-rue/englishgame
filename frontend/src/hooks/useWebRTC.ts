@@ -3,16 +3,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 interface UseWebRTCOptions {
   myId: string | null;
   onSendSignal: (targetId: string, signalData: unknown) => void;
+  iceServers?: RTCIceServer[];
 }
 
-const RTC_CONFIG: RTCConfiguration = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-  ],
-};
+const STUN_ONLY: RTCIceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+];
 
-export function useWebRTC({ myId, onSendSignal }: UseWebRTCOptions) {
+export function useWebRTC({ myId, onSendSignal, iceServers }: UseWebRTCOptions) {
+  const rtcConfigRef = useRef<RTCConfiguration>({ iceServers: STUN_ONLY });
+  rtcConfigRef.current = { iceServers: iceServers?.length ? iceServers : STUN_ONLY };
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
   const onSendSignalRef = useRef(onSendSignal);
@@ -99,7 +100,7 @@ export function useWebRTC({ myId, onSendSignal }: UseWebRTCOptions) {
     if (peersRef.current.has(peerId)) return peersRef.current.get(peerId)!;
 
     addLog(`NEW peer ${peerId.slice(0, 8)}`);
-    const pc = new RTCPeerConnection(RTC_CONFIG);
+    const pc = new RTCPeerConnection(rtcConfigRef.current);
     peersRef.current.set(peerId, pc);
 
     if (localStreamRef.current) {

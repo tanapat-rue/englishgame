@@ -34,6 +34,15 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
 
   const { transcript, isListening, isSupported, startListening, stopListening } = useSpeechRecognition();
 
+  const [iceServers, setIceServers] = useState<RTCIceServer[]>([]);
+  useEffect(() => {
+    const base = import.meta.env.DEV ? 'http://localhost:8787' : '';
+    fetch(`${base}/api/turn-credentials`)
+      .then(r => r.json())
+      .then((d: { iceServers?: RTCIceServer[] }) => { if (d.iceServers?.length) setIceServers(d.iceServers); })
+      .catch(() => {}); // silently fall back to STUN only
+  }, []);
+
   const handleSendSignal = useCallback((targetId: string, signalData: unknown) => {
     send({ type: 'webrtc_signal', targetId, signalData });
   }, [send]);
@@ -41,6 +50,7 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
   const { initLocalStream, setMuted, handleIncomingSignal, initiateConnectionTo, streamReady, remoteStreams, getAudioLevels, debugLog } = useWebRTC({
     myId,
     onSendSignal: handleSendSignal,
+    iceServers,
   });
 
   // VU meter state — driven by our own RAF loop so the hook never calls setState at 60fps

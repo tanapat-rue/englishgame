@@ -57,4 +57,6 @@ export interface Env {
   GAME_ROOM: DurableObjectNamespace;
   DB: D1Database;
   GEMINI_API_KEY: string;
+  TURN_KEY_ID?: string;
+  TURN_API_TOKEN?: string;
 }
