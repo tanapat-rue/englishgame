@@ -15,7 +15,7 @@ new_classes = ["GameRoom"]
 [[d1_databases]]
 binding = "DB"
 database_name = "englishgame-db"
-database_id = "placeholder-replace-after-wrangler-d1-create"
+database_id = "58400ce3-e360-46f1-a06d-2a296c774021"
 
 [vars]
 ENVIRONMENT = "development"
