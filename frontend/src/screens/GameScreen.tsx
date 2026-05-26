@@ -28,6 +28,7 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
   const [secretWord, setSecretWord] = useState<string | null>(shared.secretWord);
   const [chatLog, setChatLog] = useState<ChatEntryKind[]>([]);
   const [gameOver, setGameOver] = useState<{ winnerName: string | null; secretWord: string; scores: Array<{ name: string; score: number }> } | null>(null);
+  const [audioBlocked, setAudioBlocked] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const isPressingRef = useRef(false);
 
@@ -37,10 +38,32 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
     send({ type: 'webrtc_signal', targetId, signalData });
   }, [send]);
 
-  const { initLocalStream, setMuted, handleIncomingSignal, initiateConnectionTo, streamReady, remoteStreams } = useWebRTC({
+  const { initLocalStream, setMuted, handleIncomingSignal, initiateConnectionTo, streamReady, remoteStreams, getAudioLevels, debugLog } = useWebRTC({
     myId,
     onSendSignal: handleSendSignal,
   });
+
+  // VU meter state — driven by our own RAF loop so the hook never calls setState at 60fps
+  const localBarRef = useRef<HTMLDivElement>(null);
+  const remoteBarRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  useEffect(() => {
+    let raf: number;
+    const tick = () => {
+      const { local, remote } = getAudioLevels();
+      if (localBarRef.current) {
+        localBarRef.current.style.width = `${Math.round(local * 100)}%`;
+        localBarRef.current.style.backgroundColor = local > 0.6 ? '#4ade80' : local > 0.1 ? '#16a34a' : '#374151';
+      }
+      for (const [pid, el] of remoteBarRefs.current.entries()) {
+        const lvl = remote.get(pid) ?? 0;
+        el.style.width = `${Math.round(lvl * 100)}%`;
+        el.style.backgroundColor = lvl > 0.6 ? '#4ade80' : lvl > 0.1 ? '#16a34a' : '#374151';
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [getAudioLevels]);
 
   const handleIncomingSignalRef = useRef(handleIncomingSignal);
   handleIncomingSignalRef.current = handleIncomingSignal;
@@ -95,6 +118,18 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
   // Init mic once on mount
   useEffect(() => { initLocalStream(); }, [initLocalStream]);
 
+  // Unblock all remote <audio> elements on the very first user gesture after mount.
+  // This covers the Giver who never presses Hold-to-Speak before hearing a Guesser.
+  useEffect(() => {
+    const unlock = () => {
+      document.querySelectorAll<HTMLAudioElement>('audio[data-remote]').forEach(el => {
+        if (el.paused) el.play().catch(() => {});
+      });
+    };
+    document.addEventListener('pointerdown', unlock, { once: true });
+    return () => document.removeEventListener('pointerdown', unlock);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Initiate WebRTC offers once stream is ready and whenever players change
   useEffect(() => {
     if (!streamReady || !myId || !gameState) return;
@@ -148,10 +183,24 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
   return (
     <div className="min-h-screen bg-gray-950 flex flex-col">
 
-      {/* Hidden audio elements — one per remote peer, rendered in DOM for autoplay policy */}
+      {/* Hidden audio elements — one per remote peer */}
       {Array.from(remoteStreams.entries()).map(([peerId, stream]) => (
-        <RemoteAudio key={peerId} stream={stream} />
+        <RemoteAudio key={peerId} stream={stream} onBlocked={() => setAudioBlocked(true)} />
       ))}
+
+      {/* Autoplay-blocked banner — tap to unlock audio */}
+      {audioBlocked && (
+        <button
+          onClick={() => {
+            // Play all audio elements; this gesture unlocks autoplay for the page
+            document.querySelectorAll('audio').forEach(a => a.play().catch(() => {}));
+            setAudioBlocked(false);
+          }}
+          className="w-full bg-yellow-500 text-black font-bold text-sm py-3 text-center z-50"
+        >
+          🔇 Tap here to enable voice chat
+        </button>
+      )}
 
       {/* ── Header ── */}
       <div className="bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-start justify-between gap-3">
@@ -303,20 +352,61 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
           <p className="text-yellow-400 text-xs text-center">Reconnecting...</p>
         )}
       </div>
+
+      {/* ── WebRTC Debug Panel ── */}
+      <details className="bg-black border-t border-gray-700">
+        <summary className="px-3 py-1.5 text-xs text-gray-500 cursor-pointer select-none">
+          🔧 WebRTC ({remoteStreams.size} peer{remoteStreams.size !== 1 ? 's' : ''}, mic: {streamReady ? '✅' : '❌'})
+        </summary>
+        <div className="px-3 pt-2 pb-1 space-y-1">
+          {/* Local mic VU — bar updated directly via ref in RAF loop */}
+          <div className="flex items-center gap-2">
+            <span className="text-gray-500 text-[10px] w-16 flex-shrink-0">🎙️ local</span>
+            <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+              <div ref={localBarRef} className="h-full rounded-full" style={{ width: '0%' }} />
+            </div>
+          </div>
+          {/* Remote VU bars — one per stream, bar updated via ref */}
+          {Array.from(remoteStreams.keys()).map(pid => (
+            <div key={pid} className="flex items-center gap-2">
+              <span className="text-gray-500 text-[10px] w-16 flex-shrink-0 truncate">🔈 {pid.slice(0, 6)}</span>
+              <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+                <div
+                  ref={el => { if (el) remoteBarRefs.current.set(pid, el); else remoteBarRefs.current.delete(pid); }}
+                  className="h-full rounded-full"
+                  style={{ width: '0%' }}
+                />
+              </div>
+            </div>
+          ))}
+          {remoteStreams.size === 0 && <p className="text-gray-600 text-[10px]">no remote streams yet</p>}
+        </div>
+        <div className="px-3 pb-2 max-h-36 overflow-y-auto font-mono text-[10px] text-green-400 space-y-0.5 border-t border-gray-800 mt-1 pt-1">
+          {debugLog.map((l, i) => <p key={i}>{l}</p>)}
+        </div>
+      </details>
     </div>
   );
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function RemoteAudio({ stream }: { stream: MediaStream }) {
+function RemoteAudio({ stream, onBlocked }: { stream: MediaStream; onBlocked: () => void }) {
   const ref = useRef<HTMLAudioElement>(null);
+  // Use a ref for onBlocked so the effect never needs to re-run due to a new callback identity
+  const onBlockedRef = useRef(onBlocked);
+  onBlockedRef.current = onBlocked;
+
   useEffect(() => {
-    if (ref.current) ref.current.srcObject = stream;
+    const el = ref.current;
+    if (!el) return;
+    el.srcObject = stream;
+    el.play().catch(() => onBlockedRef.current());
+    // Only re-run when the stream itself changes, not on every render
   }, [stream]);
-  // autoPlay must be on the element; srcObject must be set via ref (not JSX attr)
-  return <audio ref={ref} autoPlay />;
+  return <audio ref={ref} data-remote="true" />;
 }
+
 
 function ChatBubble({ entry, isMe, aiEnabled }: { entry: ChatEntryKind; isMe: boolean; aiEnabled: boolean }) {
   const isAnswer = entry.kind === 'answer';
