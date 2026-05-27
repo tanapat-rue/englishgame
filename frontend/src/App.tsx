@@ -97,7 +97,7 @@ function HomeScreen({ onJoin }: { onJoin: (roomId: string, name: string) => void
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const apiBase = import.meta.env.DEV ? 'http://localhost:8787' : '';
+  const apiBase = import.meta.env.DEV ? 'http://localhost:8787' : (import.meta.env.VITE_WORKER_URL ?? '');
 
   const handleCreate = async () => {
     if (!name.trim()) { setError('Please enter your name'); return; }

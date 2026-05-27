@@ -36,7 +36,7 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
 
   const [iceServers, setIceServers] = useState<RTCIceServer[]>([]);
   useEffect(() => {
-    const base = import.meta.env.DEV ? 'http://localhost:8787' : '';
+    const base = import.meta.env.DEV ? 'http://localhost:8787' : (import.meta.env.VITE_WORKER_URL ?? '');
     fetch(`${base}/api/turn-credentials`)
       .then(r => r.json())
       .then((d: { iceServers?: RTCIceServer[] }) => { if (d.iceServers?.length) setIceServers(d.iceServers); })

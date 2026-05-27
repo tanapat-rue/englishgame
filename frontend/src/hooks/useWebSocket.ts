@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ClientMessage, ServerMessage } from '../types';
 
+const WORKER_URL = import.meta.env.VITE_WORKER_URL ?? '';
 const WS_BASE = import.meta.env.DEV
   ? 'ws://localhost:8787'
-  : `wss://${window.location.host}`;
+  : WORKER_URL.replace('https://', 'wss://').replace('http://', 'ws://');
 
 interface UseWebSocketOptions {
   roomId: string;
