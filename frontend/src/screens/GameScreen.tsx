@@ -125,20 +125,22 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
     });
   }, [onRegisterHandler]);
 
-  // Init mic once on mount
-  useEffect(() => { initLocalStream(); }, [initLocalStream]);
-
-  // Unblock all remote <audio> elements on the very first user gesture after mount.
-  // This covers the Giver who never presses Hold-to-Speak before hearing a Guesser.
+  // Request mic + unblock audio on first user gesture.
+  // Mobile browsers require getUserMedia to be called from a user gesture.
+  const micInitedRef = useRef(false);
   useEffect(() => {
     const unlock = () => {
+      if (!micInitedRef.current) {
+        micInitedRef.current = true;
+        initLocalStream();
+      }
       document.querySelectorAll<HTMLAudioElement>('audio[data-remote]').forEach(el => {
         if (el.paused) el.play().catch(() => {});
       });
     };
-    document.addEventListener('pointerdown', unlock, { once: true });
+    document.addEventListener('pointerdown', unlock);
     return () => document.removeEventListener('pointerdown', unlock);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [initLocalStream]);
 
   // Initiate WebRTC offers once stream is ready and whenever players change
   useEffect(() => {
@@ -163,9 +165,13 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
   const handlePressStart = useCallback(() => {
     if (isPressingRef.current) return;
     isPressingRef.current = true;
+    if (!micInitedRef.current) {
+      micInitedRef.current = true;
+      initLocalStream();
+    }
     setMuted(false);
     if (isSupported) startListening();
-  }, [setMuted, isSupported, startListening]);
+  }, [initLocalStream, setMuted, isSupported, startListening]);
 
   const handlePressEnd = useCallback(() => {
     if (!isPressingRef.current) return;
