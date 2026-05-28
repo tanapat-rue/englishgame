@@ -1,4 +1,21 @@
-name = "englishgame-fun"
+name = "englishgame"
 main = "src/index.ts"
 compatibility_date = "2024-12-30"
 compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "GAME_ROOM", class_name = "GameRoom" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameRoom"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "englishgame-db"
+database_id = "58400ce3-e360-46f1-a06d-2a296c774021"
+
+[vars]
+ENVIRONMENT = "development"
