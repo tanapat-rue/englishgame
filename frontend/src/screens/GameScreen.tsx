@@ -125,21 +125,24 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
     });
   }, [onRegisterHandler]);
 
-  // Request mic + unblock audio on first user gesture.
-  // Mobile browsers require getUserMedia to be called from a user gesture.
-  const micInitedRef = useRef(false);
+  // Request mic on mount (works on desktop HTTPS).
+  // If it fails (mobile denies without gesture), retry on first tap.
+  useEffect(() => { initLocalStream(); }, [initLocalStream]);
+
+  // On any user gesture: retry mic if not yet acquired, and unblock remote audio autoplay.
   useEffect(() => {
     const unlock = () => {
-      if (!micInitedRef.current) {
-        micInitedRef.current = true;
-        initLocalStream();
-      }
+      initLocalStream(); // no-op if already acquired
       document.querySelectorAll<HTMLAudioElement>('audio[data-remote]').forEach(el => {
         if (el.paused) el.play().catch(() => {});
       });
     };
     document.addEventListener('pointerdown', unlock);
-    return () => document.removeEventListener('pointerdown', unlock);
+    document.addEventListener('touchstart', unlock);
+    return () => {
+      document.removeEventListener('pointerdown', unlock);
+      document.removeEventListener('touchstart', unlock);
+    };
   }, [initLocalStream]);
 
   // Initiate WebRTC offers once stream is ready and whenever players change
@@ -165,10 +168,7 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
   const handlePressStart = useCallback(() => {
     if (isPressingRef.current) return;
     isPressingRef.current = true;
-    if (!micInitedRef.current) {
-      micInitedRef.current = true;
-      initLocalStream();
-    }
+    initLocalStream(); // no-op if already acquired
     setMuted(false);
     if (isSupported) startListening();
   }, [initLocalStream, setMuted, isSupported, startListening]);
