@@ -121,33 +121,36 @@ function HomeScreen({ onJoin }: { onJoin: (roomId: string, name: string) => void
   };
 
   return (
-    <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center p-4">
-      <div className="w-full max-w-sm space-y-6">
-        <div className="text-center space-y-2">
-          <h1 className="text-4xl font-bold text-white">20 Questions</h1>
-          <p className="text-gray-400 text-sm">English Learning Game</p>
+    <div className="min-h-screen bg-gradient-to-b from-gray-950 via-indigo-950/30 to-gray-950 flex flex-col items-center justify-center p-4">
+      <div className="w-full max-w-sm space-y-8">
+        {/* Logo */}
+        <div className="text-center space-y-3">
+          <div className="text-6xl">🎯</div>
+          <h1 className="text-4xl font-black text-white tracking-tight">20 Questions</h1>
+          <p className="text-indigo-300/70 text-sm font-medium">Practice English through conversation</p>
         </div>
 
-        <div className="bg-gray-900 rounded-2xl p-6 space-y-4">
+        {/* Card */}
+        <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-3xl p-6 space-y-5">
           <input
             type="text"
             placeholder="Your name"
             value={name}
             onChange={e => setName(e.target.value)}
             maxLength={20}
-            className="w-full bg-gray-800 text-white rounded-xl px-4 py-3 text-base outline-none focus:ring-2 focus:ring-indigo-500 placeholder-gray-500"
+            className="w-full bg-white/10 text-white rounded-2xl px-5 py-4 text-base outline-none focus:ring-2 focus:ring-indigo-500 placeholder-gray-500 border border-white/10"
           />
 
-          <div className="flex rounded-xl overflow-hidden border border-gray-700">
+          <div className="flex rounded-2xl overflow-hidden border border-white/10">
             <button
               onClick={() => setMode('create')}
-              className={`flex-1 py-3 text-sm font-medium transition-colors ${mode === 'create' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400'}`}
+              className={`flex-1 py-3.5 text-sm font-bold transition-all ${mode === 'create' ? 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white' : 'bg-white/5 text-gray-400'}`}
             >
               Create Room
             </button>
             <button
               onClick={() => setMode('join')}
-              className={`flex-1 py-3 text-sm font-medium transition-colors ${mode === 'join' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400'}`}
+              className={`flex-1 py-3.5 text-sm font-bold transition-all ${mode === 'join' ? 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white' : 'bg-white/5 text-gray-400'}`}
             >
               Join Room
             </button>
@@ -160,23 +163,23 @@ function HomeScreen({ onJoin }: { onJoin: (roomId: string, name: string) => void
               value={roomCode}
               onChange={e => setRoomCode(e.target.value.toUpperCase())}
               maxLength={6}
-              className="w-full bg-gray-800 text-white rounded-xl px-4 py-3 text-base outline-none focus:ring-2 focus:ring-indigo-500 placeholder-gray-500 uppercase tracking-widest"
+              className="w-full bg-white/10 text-white rounded-2xl px-5 py-4 text-base outline-none focus:ring-2 focus:ring-indigo-500 placeholder-gray-500 border border-white/10 uppercase tracking-[0.3em] text-center font-mono"
             />
           )}
 
-          {error && <p className="text-red-400 text-sm text-center">{error}</p>}
+          {error && <p className="text-red-400 text-sm text-center font-medium">{error}</p>}
 
           <button
             onClick={mode === 'create' ? handleCreate : handleJoin}
             disabled={loading}
-            className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl py-4 text-lg font-semibold transition-colors"
+            className="w-full bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-400 hover:to-purple-400 disabled:opacity-50 active:scale-[0.97] text-white rounded-2xl py-5 text-lg font-bold shadow-xl shadow-indigo-500/30 transition-all duration-150"
           >
             {loading ? 'Creating...' : mode === 'create' ? 'Create Room' : 'Join Room'}
           </button>
         </div>
 
         <p className="text-center text-gray-600 text-xs">
-          No download required · Works in Safari, Chrome, Edge
+          No download needed · Voice-powered · AI scoring
         </p>
       </div>
     </div>

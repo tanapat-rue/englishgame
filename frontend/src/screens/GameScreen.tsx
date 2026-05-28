@@ -24,11 +24,11 @@ type ChatEntryKind = ChatEntry & { kind: 'question' | 'answer' };
 export default function GameScreen({ playerName, shared, send, connected, onRegisterHandler, onLeave }: Props) {
   const [gameState, setGameState] = useState<GameState | null>(shared.gameState);
   const [myId] = useState<string | null>(shared.myId);
-  // Initialise from shared so even if secret_word arrived before this screen mounted it shows
   const [secretWord, setSecretWord] = useState<string | null>(shared.secretWord);
   const [chatLog, setChatLog] = useState<ChatEntryKind[]>([]);
   const [gameOver, setGameOver] = useState<{ winnerName: string | null; secretWord: string; scores: Array<{ name: string; score: number }> } | null>(null);
   const [audioBlocked, setAudioBlocked] = useState(false);
+  const [lastScore, setLastScore] = useState<{ score: number; show: boolean }>({ score: 0, show: false });
   const chatEndRef = useRef<HTMLDivElement>(null);
   const isPressingRef = useRef(false);
 
@@ -40,7 +40,7 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
     fetch(`${base}/api/turn-credentials`)
       .then(r => r.json())
       .then((d: { iceServers?: RTCIceServer[] }) => { if (d.iceServers?.length) setIceServers(d.iceServers); })
-      .catch(() => {}); // silently fall back to STUN only
+      .catch(() => {});
   }, []);
 
   const handleSendSignal = useCallback((targetId: string, signalData: unknown) => {
@@ -53,7 +53,6 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
     iceServers,
   });
 
-  // VU meter state — driven by our own RAF loop so the hook never calls setState at 60fps
   const localBarRef = useRef<HTMLDivElement>(null);
   const remoteBarRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   useEffect(() => {
@@ -78,7 +77,6 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
   const handleIncomingSignalRef = useRef(handleIncomingSignal);
   handleIncomingSignalRef.current = handleIncomingSignal;
 
-  // Register message handler with App
   useEffect(() => {
     onRegisterHandler((msg: ServerMessage) => {
       switch (msg.type) {
@@ -99,6 +97,8 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
             highlightedWords: msg.highlightedWords,
             timestamp: Date.now(),
           }]);
+          setLastScore({ score: msg.score, show: true });
+          setTimeout(() => setLastScore(prev => ({ ...prev, show: false })), 2000);
           break;
         case 'giver_answer':
           setChatLog(prev => [...prev, {
@@ -125,14 +125,11 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
     });
   }, [onRegisterHandler]);
 
-  // Request mic on mount (works on desktop HTTPS).
-  // If it fails (mobile denies without gesture), retry on first tap.
   useEffect(() => { initLocalStream(); }, [initLocalStream]);
 
-  // On any user gesture: retry mic if not yet acquired, and unblock remote audio autoplay.
   useEffect(() => {
     const unlock = () => {
-      initLocalStream(); // no-op if already acquired
+      initLocalStream();
       document.querySelectorAll<HTMLAudioElement>('audio[data-remote]').forEach(el => {
         if (el.paused) el.play().catch(() => {});
       });
@@ -145,11 +142,9 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
     };
   }, [initLocalStream]);
 
-  // Initiate WebRTC offers once stream is ready and whenever players change
   useEffect(() => {
     if (!streamReady || !myId || !gameState) return;
     gameState.players.forEach(p => {
-      // Only the lexicographically larger ID initiates to avoid double-offers
       if (p.id !== myId && p.isConnected && p.id > myId) {
         initiateConnectionTo(p.id);
       }
@@ -164,11 +159,10 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
   const isGiver = myRole === 'giver';
   const isMyTurn = !isGiver && myId !== null && gameState?.currentGuesserId === myId;
 
-  // Hold-to-speak: unmute WebRTC AND start STT simultaneously
   const handlePressStart = useCallback(() => {
     if (isPressingRef.current) return;
     isPressingRef.current = true;
-    initLocalStream(); // no-op if already acquired
+    initLocalStream();
     setMuted(false);
     if (isSupported) startListening();
   }, [initLocalStream, setMuted, isSupported, startListening]);
@@ -191,20 +185,22 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
   const aiEnabled = gameState?.aiEnabled ?? false;
   const guessers = gameState?.players.filter(p => p.role === 'guesser') ?? [];
   const currentGuesser = gameState?.players.find(p => p.id === gameState?.currentGuesserId);
+  const questionsLeft = gameState?.questionsLeft ?? 20;
+  const progress = ((20 - questionsLeft) / 20) * 100;
 
   if (gameOver) {
     return <GameOverScreen gameOver={gameOver} aiEnabled={aiEnabled} onLeave={onLeave} />;
   }
 
   return (
-    <div className="min-h-screen bg-gray-950 flex flex-col">
+    <div className="min-h-screen bg-gradient-to-b from-gray-950 via-gray-900 to-gray-950 flex flex-col overflow-hidden">
 
-      {/* Hidden audio elements — one per remote peer */}
+      {/* Remote audio elements */}
       {Array.from(remoteStreams.entries()).map(([peerId, stream]) => (
         <RemoteAudio key={peerId} stream={stream} onBlocked={() => setAudioBlocked(true)} />
       ))}
 
-      {/* Mic not acquired — show prominent enable button */}
+      {/* Mic enable banner */}
       {!streamReady && (
         <button
           onClick={async () => {
@@ -213,158 +209,195 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
               if (el.paused) el.play().catch(() => {});
             });
           }}
-          className="w-full bg-indigo-600 text-white font-bold text-sm py-3 text-center z-50"
+          className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-bold text-sm py-3 text-center"
         >
           🎙️ Tap to enable microphone
         </button>
       )}
 
-      {/* Autoplay-blocked banner — tap to unlock audio */}
       {audioBlocked && streamReady && (
         <button
           onClick={() => {
             document.querySelectorAll<HTMLAudioElement>('audio').forEach(a => a.play().catch(() => {}));
             setAudioBlocked(false);
           }}
-          className="w-full bg-yellow-500 text-black font-bold text-sm py-3 text-center z-50"
+          className="w-full bg-yellow-500 text-black font-bold text-sm py-3 text-center"
         >
-          🔇 Tap here to enable voice chat
+          🔇 Tap to enable voice chat
         </button>
       )}
 
-      {/* ── Header ── */}
-      <div className="bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0">
-          <p className="text-gray-400 text-xs uppercase tracking-widest mb-1">
-            {isGiver ? '🎯 You are the Giver' : '🔍 You are a Guesser'}
-          </p>
-          {isGiver && secretWord && (
-            <div className="bg-indigo-900/60 border border-indigo-600 rounded-xl px-3 py-2 mt-1">
-              <p className="text-gray-400 text-xs">Secret word</p>
-              <p className="text-indigo-200 text-2xl font-bold tracking-wide">{secretWord}</p>
-            </div>
-          )}
-          {!isGiver && aiEnabled && (
-            <div className="flex items-center gap-1.5 mt-1">
-              <p className="text-gray-400 text-xs">Your score:</p>
-              <p className="text-yellow-400 font-bold text-sm">
-                {gameState?.players.find(p => p.id === myId)?.score ?? 0} pts
-              </p>
-            </div>
-          )}
+      {/* ═══ TOP: Role Badge + Progress ═══ */}
+      <div className="relative px-4 pt-4 pb-2">
+        {/* Role badge */}
+        <div className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-bold ${
+          isGiver
+            ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-lg shadow-orange-500/30'
+            : 'bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-lg shadow-indigo-500/30'
+        }`}>
+          <span className="text-lg">{isGiver ? '🎯' : '🔍'}</span>
+          <span>{isGiver ? 'GIVER' : 'GUESSER'}</span>
         </div>
-        <div className="text-right flex-shrink-0">
-          <p className="text-gray-400 text-xs">Questions left</p>
-          <p className={`text-3xl font-bold tabular-nums ${(gameState?.questionsLeft ?? 0) <= 5 ? 'text-red-400' : 'text-white'}`}>
-            {gameState?.questionsLeft ?? 20}
-          </p>
+
+        {/* Question counter */}
+        <div className="absolute top-4 right-4 flex flex-col items-center">
+          <div className="relative w-14 h-14">
+            <svg className="w-14 h-14 -rotate-90" viewBox="0 0 56 56">
+              <circle cx="28" cy="28" r="24" stroke="#1f2937" strokeWidth="4" fill="none" />
+              <circle cx="28" cy="28" r="24" stroke={questionsLeft <= 5 ? '#ef4444' : '#6366f1'} strokeWidth="4" fill="none"
+                strokeDasharray={`${progress * 1.508} 150.8`} strokeLinecap="round" className="transition-all duration-500" />
+            </svg>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <span className={`text-lg font-black ${questionsLeft <= 5 ? 'text-red-400' : 'text-white'}`}>{questionsLeft}</span>
+            </div>
+          </div>
+          <span className="text-gray-500 text-[10px] mt-0.5">LEFT</span>
         </div>
       </div>
 
-      {/* ── Guesser scoreboard (visible to all) ── */}
-      {guessers.length > 0 && (
-        <div className="bg-gray-900/60 border-b border-gray-800 px-4 py-2 flex gap-3 overflow-x-auto">
-          {guessers.filter(p => p.isConnected).map(p => (
-            <div key={p.id} className={`flex items-center gap-2 rounded-xl px-3 py-1.5 flex-shrink-0 ${
-              p.id === gameState?.currentGuesserId ? 'bg-green-900/60 ring-1 ring-green-500' : 'bg-gray-800'
-            }`}>
-              <div className="w-6 h-6 rounded-full bg-indigo-700 flex items-center justify-center text-xs font-bold text-indigo-100">
-                {p.name.charAt(0).toUpperCase()}
-              </div>
-              <div>
-                <p className="text-white text-xs font-medium leading-none">{p.name}{p.id === myId ? ' (you)' : ''}</p>
-                {aiEnabled && <p className="text-yellow-400 text-xs leading-none mt-0.5">{p.score} pts</p>}
-              </div>
-              {p.id === gameState?.currentGuesserId && (
-                <span className="text-green-400 text-xs ml-1">●</span>
-              )}
-            </div>
-          ))}
+      {/* ═══ SECRET WORD (Giver only) ═══ */}
+      {isGiver && secretWord && (
+        <div className="mx-4 mb-2">
+          <div className="bg-gradient-to-r from-amber-900/40 to-orange-900/40 border border-amber-600/50 rounded-2xl px-5 py-4 backdrop-blur-sm">
+            <p className="text-amber-300/70 text-xs font-medium uppercase tracking-widest mb-1">Your Secret Word</p>
+            <p className="text-amber-100 text-3xl font-black tracking-wide">{secretWord}</p>
+          </div>
         </div>
       )}
 
-      {/* ── Chat log ── */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-2">
+      {/* ═══ SCOREBOARD ═══ */}
+      <div className="px-4 mb-2">
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {guessers.filter(p => p.isConnected).map(p => {
+            const isActive = p.id === gameState?.currentGuesserId;
+            const isMe = p.id === myId;
+            return (
+              <div key={p.id} className={`flex-shrink-0 flex items-center gap-2 px-3 py-2 rounded-xl transition-all duration-300 ${
+                isActive ? 'bg-green-500/20 ring-2 ring-green-400 scale-105' : 'bg-white/5'
+              }`}>
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                  isActive ? 'bg-green-500 text-white' : 'bg-indigo-600 text-indigo-100'
+                }`}>
+                  {p.name.charAt(0).toUpperCase()}
+                </div>
+                <div className="min-w-0">
+                  <p className={`text-xs font-semibold truncate max-w-[60px] ${isMe ? 'text-indigo-300' : 'text-white'}`}>
+                    {isMe ? 'You' : p.name}
+                  </p>
+                  {aiEnabled && (
+                    <p className="text-yellow-400 text-xs font-bold">{p.score} pts</p>
+                  )}
+                </div>
+                {isActive && <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ═══ CHAT / QUESTION LOG ═══ */}
+      <div className="flex-1 overflow-y-auto px-4 space-y-3 py-2">
         {chatLog.length === 0 && (
-          <p className="text-center text-gray-600 text-sm mt-10">
-            Game started!{currentGuesser ? ` ${currentGuesser.name} asks first.` : ''}
-          </p>
+          <div className="flex flex-col items-center justify-center h-full text-center gap-3 opacity-60">
+            <div className="text-5xl">💬</div>
+            <p className="text-gray-400 text-sm">
+              {isGiver ? 'Wait for questions from guessers...' : 'Ask Yes/No questions to guess the word!'}
+            </p>
+          </div>
         )}
         {chatLog.map(entry => (
-          <ChatBubble
-            key={entry.id}
-            entry={entry}
-            isMe={entry.playerName === playerName}
-            aiEnabled={aiEnabled}
-          />
+          <QuestionCard key={entry.id} entry={entry} isMe={entry.playerName === playerName} aiEnabled={aiEnabled} />
         ))}
         <div ref={chatEndRef} />
       </div>
 
-      {/* ── Turn label ── */}
-      <div className="bg-gray-900 border-t border-gray-800 px-4 py-2 text-sm text-center">
-        {isMyTurn
-          ? <span className="text-green-400 font-semibold">Your turn to ask!</span>
-          : isGiver
-            ? <span className="text-orange-300">
-                Listening to <span className="font-semibold">{currentGuesser?.name ?? '...'}</span>
-              </span>
-            : <span className="text-gray-400">
-                <span className="text-white font-semibold">{currentGuesser?.name ?? '...'}</span> is asking...
-              </span>
-        }
+      {/* ═══ FLOATING SCORE POPUP ═══ */}
+      {lastScore.show && aiEnabled && (
+        <div className="fixed top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-none animate-bounce">
+          <div className={`text-6xl font-black ${
+            lastScore.score >= 8 ? 'text-green-400' : lastScore.score >= 5 ? 'text-yellow-400' : 'text-red-400'
+          } drop-shadow-[0_0_30px_rgba(255,255,255,0.3)]`}>
+            +{lastScore.score}
+          </div>
+        </div>
+      )}
+
+      {/* ═══ TURN INDICATOR ═══ */}
+      <div className="px-4 py-2 text-center">
+        {isMyTurn ? (
+          <div className="inline-flex items-center gap-2 px-4 py-1.5 bg-green-500/20 rounded-full border border-green-500/40">
+            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            <span className="text-green-300 text-sm font-semibold">Your turn to ask!</span>
+          </div>
+        ) : isGiver ? (
+          <p className="text-orange-300/80 text-sm">
+            Listening to <span className="font-bold text-orange-200">{currentGuesser?.name ?? '...'}</span>
+          </p>
+        ) : (
+          <p className="text-gray-400 text-sm">
+            <span className="font-bold text-white">{currentGuesser?.name ?? '...'}</span> is thinking...
+          </p>
+        )}
       </div>
 
-      {/* ── Controls ── */}
-      <div className="bg-gray-900 border-t border-gray-800 p-4 space-y-3">
+      {/* ═══ CONTROLS ═══ */}
+      <div className="px-4 pb-6 pt-2 space-y-3">
+        {/* Transcript preview */}
+        {transcript && (
+          <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl px-4 py-3 text-white text-sm">
+            {transcript}
+          </div>
+        )}
 
-        {/* Current guesser's speaking button */}
-        {isMyTurn && (
-          <div className="space-y-2">
-            {transcript && (
-              <div className="bg-gray-800 rounded-xl px-4 py-3 text-white text-sm">
-                {transcript}
+        {/* Speak button — Guesser on their turn */}
+        {isMyTurn && !isGiver && (
+          <button
+            onPointerDown={handlePressStart}
+            onPointerUp={handlePressEnd}
+            onPointerLeave={handlePressEnd}
+            onTouchStart={handlePressStart}
+            onTouchEnd={handlePressEnd}
+            className={`w-full relative overflow-hidden rounded-3xl py-6 text-white font-bold text-xl select-none transition-all duration-150 ${
+              isListening
+                ? 'bg-gradient-to-r from-red-500 to-pink-500 scale-[0.97] shadow-2xl shadow-red-500/40'
+                : 'bg-gradient-to-r from-indigo-500 to-purple-500 active:scale-[0.97] shadow-xl shadow-indigo-500/30'
+            }`}
+          >
+            {isListening && (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="w-20 h-20 rounded-full bg-white/10 animate-ping" />
               </div>
             )}
-            <button
-              onPointerDown={handlePressStart}
-              onPointerUp={handlePressEnd}
-              onPointerLeave={handlePressEnd}
-              className={`w-full py-5 rounded-2xl text-white text-xl font-bold select-none transition-all ${
-                isListening ? 'bg-red-600 scale-[0.98]' : 'bg-indigo-600 active:scale-[0.98]'
-              }`}
-            >
-              {isListening ? '🎙️ Listening...' : '🎙️ Hold to Speak'}
-            </button>
-            {!isSupported && (
-              <p className="text-yellow-400 text-xs text-center">
-                Speech recognition not supported. Your voice is still sent — type if needed.
-              </p>
-            )}
-          </div>
+            <span className="relative z-10 flex items-center justify-center gap-2">
+              <span className="text-2xl">{isListening ? '🎙️' : '🎤'}</span>
+              <span>{isListening ? 'Listening...' : 'Hold to Ask'}</span>
+            </span>
+          </button>
         )}
 
         {/* Giver controls */}
         {isGiver && (
-          <div className="space-y-2">
-            {transcript && (
-              <div className="bg-gray-800 rounded-xl px-4 py-3 text-white text-sm">
-                {transcript}
-              </div>
-            )}
+          <div className="space-y-3">
             <button
               onPointerDown={handlePressStart}
               onPointerUp={handlePressEnd}
               onPointerLeave={handlePressEnd}
-              className={`w-full py-4 rounded-2xl text-white text-base font-semibold select-none transition-all ${
-                isListening ? 'bg-orange-600 scale-[0.98]' : 'bg-gray-700 active:scale-[0.98]'
+              onTouchStart={handlePressStart}
+              onTouchEnd={handlePressEnd}
+              className={`w-full rounded-3xl py-5 text-white font-bold text-lg select-none transition-all duration-150 ${
+                isListening
+                  ? 'bg-gradient-to-r from-orange-500 to-amber-500 scale-[0.97] shadow-xl shadow-orange-500/40'
+                  : 'bg-white/10 border border-white/20 active:scale-[0.97]'
               }`}
             >
-              {isListening ? '🔊 Speaking...' : '🔊 Hold to Answer'}
+              <span className="flex items-center justify-center gap-2">
+                <span className="text-xl">{isListening ? '🔊' : '🎙️'}</span>
+                <span>{isListening ? 'Speaking...' : 'Hold to Answer'}</span>
+              </span>
             </button>
             <button
               onClick={handleNextTurn}
-              className="w-full bg-green-600 hover:bg-green-500 active:scale-[0.98] text-white rounded-2xl py-4 text-base font-semibold transition-all"
+              className="w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-400 hover:to-emerald-400 active:scale-[0.97] text-white rounded-3xl py-5 text-lg font-bold shadow-xl shadow-green-500/30 transition-all duration-150"
             >
               Next Question →
             </button>
@@ -373,45 +406,45 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
 
         {/* Waiting state */}
         {!isMyTurn && !isGiver && (
-          <p className="text-center text-gray-400 py-3">
-            Waiting for <span className="text-white font-semibold">{currentGuesser?.name ?? '...'}</span> to ask...
-          </p>
+          <div className="text-center py-4">
+            <div className="inline-flex items-center gap-2 text-gray-400">
+              <div className="flex gap-1">
+                <div className="w-2 h-2 rounded-full bg-gray-500 animate-bounce [animation-delay:0ms]" />
+                <div className="w-2 h-2 rounded-full bg-gray-500 animate-bounce [animation-delay:150ms]" />
+                <div className="w-2 h-2 rounded-full bg-gray-500 animate-bounce [animation-delay:300ms]" />
+              </div>
+              <span className="text-sm">Waiting for {currentGuesser?.name ?? '...'}</span>
+            </div>
+          </div>
         )}
 
         {!connected && (
-          <p className="text-yellow-400 text-xs text-center">Reconnecting...</p>
+          <p className="text-yellow-400 text-xs text-center animate-pulse">Reconnecting...</p>
         )}
       </div>
 
-      {/* ── WebRTC Debug Panel ── */}
-      <details className="bg-black border-t border-gray-700">
-        <summary className="px-3 py-1.5 text-xs text-gray-500 cursor-pointer select-none">
-          🔧 WebRTC ({remoteStreams.size} peer{remoteStreams.size !== 1 ? 's' : ''}, mic: {streamReady ? '✅' : '❌'})
+      {/* ═══ DEBUG PANEL ═══ */}
+      <details className="bg-black/80 border-t border-gray-800">
+        <summary className="px-3 py-1.5 text-xs text-gray-600 cursor-pointer select-none">
+          debug ({remoteStreams.size} peer{remoteStreams.size !== 1 ? 's' : ''}, mic: {streamReady ? '✅' : '❌'})
         </summary>
         <div className="px-3 pt-2 pb-1 space-y-1">
-          {/* Local mic VU — bar updated directly via ref in RAF loop */}
           <div className="flex items-center gap-2">
-            <span className="text-gray-500 text-[10px] w-16 flex-shrink-0">🎙️ local</span>
-            <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+            <span className="text-gray-500 text-[10px] w-14 flex-shrink-0">local</span>
+            <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
               <div ref={localBarRef} className="h-full rounded-full" style={{ width: '0%' }} />
             </div>
           </div>
-          {/* Remote VU bars — one per stream, bar updated via ref */}
           {Array.from(remoteStreams.keys()).map(pid => (
             <div key={pid} className="flex items-center gap-2">
-              <span className="text-gray-500 text-[10px] w-16 flex-shrink-0 truncate">🔈 {pid.slice(0, 6)}</span>
-              <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
-                <div
-                  ref={el => { if (el) remoteBarRefs.current.set(pid, el); else remoteBarRefs.current.delete(pid); }}
-                  className="h-full rounded-full"
-                  style={{ width: '0%' }}
-                />
+              <span className="text-gray-500 text-[10px] w-14 flex-shrink-0 truncate">{pid.slice(0, 6)}</span>
+              <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                <div ref={el => { if (el) remoteBarRefs.current.set(pid, el); else remoteBarRefs.current.delete(pid); }} className="h-full rounded-full" style={{ width: '0%' }} />
               </div>
             </div>
           ))}
-          {remoteStreams.size === 0 && <p className="text-gray-600 text-[10px]">no remote streams yet</p>}
         </div>
-        <div className="px-3 pb-2 max-h-36 overflow-y-auto font-mono text-[10px] text-green-400 space-y-0.5 border-t border-gray-800 mt-1 pt-1">
+        <div className="px-3 pb-2 max-h-28 overflow-y-auto font-mono text-[9px] text-green-400/70 space-y-0.5">
           {debugLog.map((l, i) => <p key={i}>{l}</p>)}
         </div>
       </details>
@@ -419,61 +452,74 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
   );
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
+// ═══ COMPONENTS ═══════════════════════════════════════════════════════════════
 
 function RemoteAudio({ stream, onBlocked }: { stream: MediaStream; onBlocked: () => void }) {
   const ref = useRef<HTMLAudioElement>(null);
-  // Use a ref for onBlocked so the effect never needs to re-run due to a new callback identity
   const onBlockedRef = useRef(onBlocked);
   onBlockedRef.current = onBlocked;
-
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     el.srcObject = stream;
     el.play().catch(() => onBlockedRef.current());
-    // Only re-run when the stream itself changes, not on every render
   }, [stream]);
   return <audio ref={ref} data-remote="true" />;
 }
 
-
-function ChatBubble({ entry, isMe, aiEnabled }: { entry: ChatEntryKind; isMe: boolean; aiEnabled: boolean }) {
+function QuestionCard({ entry, isMe, aiEnabled }: { entry: ChatEntryKind; isMe: boolean; aiEnabled: boolean }) {
   const isAnswer = entry.kind === 'answer';
   return (
-    <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-      <p className="text-gray-500 text-xs mb-1 px-1">
-        {isAnswer ? `${entry.playerName} (answer)` : entry.playerName}
-      </p>
-      <div className={`max-w-[85%] rounded-2xl px-4 py-3 space-y-2 ${
+    <div className={`${isMe ? 'ml-6' : 'mr-6'}`}>
+      <div className={`rounded-2xl p-4 backdrop-blur-sm border transition-all ${
         isAnswer
-          ? 'bg-orange-900/60 border border-orange-700'
-          : isMe ? 'bg-indigo-800' : 'bg-gray-800'
+          ? 'bg-gradient-to-br from-amber-900/30 to-orange-900/20 border-amber-600/30'
+          : isMe
+            ? 'bg-gradient-to-br from-indigo-900/40 to-purple-900/30 border-indigo-500/30'
+            : 'bg-white/5 border-white/10'
       }`}>
-        <p className="text-white text-base">{entry.question}</p>
-        {!isAnswer && aiEnabled && (
-          <>
-            <div className="flex items-center gap-2">
-              <ScoreBadge score={entry.score} />
-              <p className="text-gray-300 text-xs flex-1">{entry.feedback}</p>
-            </div>
-            {entry.highlightedWords.length > 0 && (
-              <div className="flex flex-wrap gap-1">
-                {entry.highlightedWords.map(w => (
-                  <span key={w} className="bg-yellow-800 text-yellow-200 text-xs px-2 py-0.5 rounded-full">{w}</span>
-                ))}
-              </div>
-            )}
-          </>
+        {/* Header */}
+        <div className="flex items-center gap-2 mb-2">
+          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${
+            isAnswer ? 'bg-amber-600 text-white' : 'bg-indigo-600 text-white'
+          }`}>
+            {entry.playerName.charAt(0).toUpperCase()}
+          </div>
+          <span className="text-gray-400 text-xs font-medium">
+            {isAnswer ? `${entry.playerName} (Answer)` : entry.playerName}
+          </span>
+          {!isAnswer && aiEnabled && (
+            <span className={`ml-auto px-2 py-0.5 rounded-full text-xs font-bold ${
+              entry.score >= 8 ? 'bg-green-500/20 text-green-300' :
+              entry.score >= 5 ? 'bg-yellow-500/20 text-yellow-300' :
+              'bg-red-500/20 text-red-300'
+            }`}>
+              {entry.score}/10
+            </span>
+          )}
+        </div>
+
+        {/* Question text */}
+        <p className="text-white text-base leading-relaxed">{entry.question}</p>
+
+        {/* AI Feedback */}
+        {!isAnswer && aiEnabled && entry.feedback && (
+          <p className="text-gray-400 text-xs mt-2 italic">{entry.feedback}</p>
+        )}
+
+        {/* Highlighted words */}
+        {!isAnswer && aiEnabled && entry.highlightedWords.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-2">
+            {entry.highlightedWords.map(w => (
+              <span key={w} className="bg-emerald-500/20 text-emerald-300 text-xs px-2 py-0.5 rounded-full border border-emerald-500/30">
+                {w}
+              </span>
+            ))}
+          </div>
         )}
       </div>
     </div>
   );
-}
-
-function ScoreBadge({ score }: { score: number }) {
-  const color = score >= 8 ? 'bg-green-700 text-green-100' : score >= 5 ? 'bg-yellow-700 text-yellow-100' : 'bg-red-800 text-red-200';
-  return <span className={`text-xs font-bold px-2 py-0.5 rounded-full flex-shrink-0 ${color}`}>{score}/10</span>;
 }
 
 function GameOverScreen({ gameOver, aiEnabled, onLeave }: {
@@ -482,32 +528,48 @@ function GameOverScreen({ gameOver, aiEnabled, onLeave }: {
   onLeave: () => void;
 }) {
   return (
-    <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center p-4">
-      <div className="w-full max-w-sm space-y-6">
-        <div className="text-center space-y-2">
-          <p className="text-5xl">{gameOver.winnerName ? '🏆' : '😔'}</p>
-          <h2 className="text-2xl font-bold text-white">
-            {gameOver.winnerName ? `${gameOver.winnerName} won!` : 'No one guessed it!'}
+    <div className="min-h-screen bg-gradient-to-b from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center justify-center p-6">
+      <div className="w-full max-w-sm space-y-8">
+        {/* Trophy / Result */}
+        <div className="text-center space-y-3">
+          <div className="text-7xl animate-bounce">{gameOver.winnerName ? '🏆' : '⏰'}</div>
+          <h2 className="text-3xl font-black text-white">
+            {gameOver.winnerName ? `${gameOver.winnerName} wins!` : 'Time\'s up!'}
           </h2>
-          <p className="text-gray-400">
-            The secret word was: <span className="text-indigo-300 font-bold">{gameOver.secretWord}</span>
-          </p>
+          <div className="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-5 py-2.5 border border-white/20">
+            <span className="text-gray-400 text-sm">The word was</span>
+            <span className="text-indigo-300 font-black text-lg">{gameOver.secretWord}</span>
+          </div>
         </div>
-        <div className="bg-gray-900 rounded-2xl p-6 space-y-3">
-          <p className="text-gray-400 text-xs uppercase tracking-widest">
-            {aiEnabled ? 'Final Scores' : 'Players'}
-          </p>
-          {gameOver.scores.map((s, i) => (
-            <div key={s.name} className="flex items-center gap-3 bg-gray-800 rounded-xl px-4 py-3">
-              <span className="text-lg">{i === 0 ? '🥇' : i === 1 ? '🥈' : '🥉'}</span>
-              <span className="text-white font-medium flex-1">{s.name}</span>
-              {aiEnabled && <span className="text-yellow-400 font-bold">{s.score} pts</span>}
-            </div>
-          ))}
+
+        {/* Leaderboard */}
+        <div className="space-y-3">
+          <h3 className="text-gray-400 text-xs font-bold uppercase tracking-widest text-center">
+            {aiEnabled ? 'Leaderboard' : 'Players'}
+          </h3>
+          {gameOver.scores.map((s, i) => {
+            const medals = ['🥇', '🥈', '🥉'];
+            return (
+              <div key={s.name} className={`flex items-center gap-3 rounded-2xl px-4 py-3.5 transition-all ${
+                i === 0 ? 'bg-gradient-to-r from-yellow-900/30 to-amber-900/20 border border-yellow-600/30 scale-105' :
+                'bg-white/5 border border-white/10'
+              }`}>
+                <span className="text-2xl w-8 text-center">{medals[i] ?? `#${i + 1}`}</span>
+                <span className="text-white font-semibold flex-1">{s.name}</span>
+                {aiEnabled && (
+                  <span className={`font-black text-lg ${i === 0 ? 'text-yellow-400' : 'text-gray-300'}`}>
+                    {s.score}
+                  </span>
+                )}
+              </div>
+            );
+          })}
         </div>
+
+        {/* Play again */}
         <button
           onClick={onLeave}
-          className="w-full bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl py-4 text-lg font-semibold transition-colors"
+          className="w-full bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-400 hover:to-purple-400 active:scale-[0.97] text-white rounded-3xl py-5 text-lg font-bold shadow-xl shadow-indigo-500/30 transition-all duration-150"
         >
           Play Again
         </button>
