@@ -4,8 +4,10 @@ dist/
 .dev.vars
 *.local
 .DS_Store
+wrangler.jsonc
 
 .dev.vars*
 !.dev.vars.example
 .env*
 !.env.example
+!.env.production
