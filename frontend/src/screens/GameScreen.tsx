@@ -204,12 +204,26 @@ export default function GameScreen({ playerName, shared, send, connected, onRegi
         <RemoteAudio key={peerId} stream={stream} onBlocked={() => setAudioBlocked(true)} />
       ))}
 
+      {/* Mic not acquired — show prominent enable button */}
+      {!streamReady && (
+        <button
+          onClick={async () => {
+            await initLocalStream();
+            document.querySelectorAll<HTMLAudioElement>('audio[data-remote]').forEach(el => {
+              if (el.paused) el.play().catch(() => {});
+            });
+          }}
+          className="w-full bg-indigo-600 text-white font-bold text-sm py-3 text-center z-50"
+        >
+          🎙️ Tap to enable microphone
+        </button>
+      )}
+
       {/* Autoplay-blocked banner — tap to unlock audio */}
-      {audioBlocked && (
+      {audioBlocked && streamReady && (
         <button
           onClick={() => {
-            // Play all audio elements; this gesture unlocks autoplay for the page
-            document.querySelectorAll('audio').forEach(a => a.play().catch(() => {}));
+            document.querySelectorAll<HTMLAudioElement>('audio').forEach(a => a.play().catch(() => {}));
             setAudioBlocked(false);
           }}
           className="w-full bg-yellow-500 text-black font-bold text-sm py-3 text-center z-50"
