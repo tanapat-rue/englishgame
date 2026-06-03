@@ -15,13 +15,12 @@ interface GameSession {
 interface SharedGameState {
   gameState: GameState | null;
   myId: string | null;
-  secretWord: string | null;
 }
 
 export default function App() {
   const [screen, setScreen] = useState<AppScreen>('home');
   const [session, setSession] = useState<GameSession | null>(null);
-  const [shared, setShared] = useState<SharedGameState>({ gameState: null, myId: null, secretWord: null });
+  const [shared, setShared] = useState<SharedGameState>({ gameState: null, myId: null });
 
   // onMessage is consumed by both lobby and game screens via the same WS connection.
   // We use a ref so the WS hook never needs to re-subscribe when the handler changes.
@@ -31,11 +30,6 @@ export default function App() {
     if (msg.type === 'room_state') {
       setShared(prev => ({ ...prev, gameState: msg.state, myId: prev.myId ?? msg.yourPlayerId }));
       if (msg.state.status === 'playing') setScreen('game');
-    }
-    // Buffer secret_word at App level so GameScreen always gets it even if it
-    // wasn't mounted yet when the WS event arrived
-    if (msg.type === 'secret_word') {
-      setShared(prev => ({ ...prev, secretWord: msg.word }));
     }
     screenHandlerRef.current?.(msg);
   }, []);
@@ -49,13 +43,13 @@ export default function App() {
 
   const handleJoinRoom = (roomId: string, playerName: string) => {
     setSession({ roomId, playerName });
-    setShared({ gameState: null, myId: null, secretWord: null });
+    setShared({ gameState: null, myId: null });
     setScreen('lobby');
   };
 
   const handleLeaveGame = () => {
     setSession(null);
-    setShared({ gameState: null, myId: null, secretWord: null });
+    setShared({ gameState: null, myId: null });
     setScreen('home');
   };
 

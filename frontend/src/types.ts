@@ -1,10 +1,8 @@
-export type PlayerRole = 'word_master' | 'guesser';
 export type GameStatus = 'lobby' | 'playing' | 'finished';
 
 export interface Player {
   id: string;
   name: string;
-  role: PlayerRole;
   score: number;
   isConnected: boolean;
 }
@@ -13,15 +11,13 @@ export interface GameState {
   roomId: string;
   status: GameStatus;
   players: Player[];
-  secretWord: string | null;
   wordLength: number;
-  wordMasterId: string | null;
+  maskedWord: string[];
   guessedLetters: string[];
   wrongLetters: string[];
   maxWrong: number;
-  hintsUsed: number;
   speakLog: SpeakEntry[];
-  winnerTeam: 'guessers' | 'master' | null;
+  winner: 'players' | 'house' | null;
 }
 
 export interface SpeakEntry {
@@ -36,11 +32,9 @@ export interface SpeakEntry {
 export type ServerMessage =
   | { type: 'room_state'; state: GameState; yourPlayerId: string }
   | { type: 'webrtc_signal'; fromId: string; signalData: unknown }
-  | { type: 'secret_word'; word: string }
-  | { type: 'letter_result'; letter: string; correct: boolean; guessedLetters: string[]; wrongLetters: string[]; playerId: string; playerName: string }
-  | { type: 'hint_given'; letter: string; hintsUsed: number }
+  | { type: 'letter_result'; letter: string; correct: boolean; maskedWord: string[]; guessedLetters: string[]; wrongLetters: string[]; playerId: string; playerName: string }
   | { type: 'speak_logged'; entry: SpeakEntry }
-  | { type: 'game_over'; winnerTeam: 'guessers' | 'master'; secretWord: string; scores: Array<{ name: string; score: number }> }
+  | { type: 'game_over'; winner: 'players' | 'house'; secretWord: string; scores: Array<{ name: string; score: number }> }
   | { type: 'error'; message: string }
   | { type: 'pong' };
 
@@ -50,10 +44,8 @@ export type ClientMessage =
   | { type: 'start_game' }
   | { type: 'guess_letter'; letter: string }
   | { type: 'speak_log'; text: string }
-  | { type: 'give_hint' }
   | { type: 'ping' };
 
-// Keep ChatEntry for compatibility but it's no longer used in hangman
 export interface ChatEntry {
   id: string;
   playerName: string;

@@ -10,21 +10,25 @@ interface WsAttachment {
   playerId: string;
 }
 
-// Stripped words to score: remove punctuation, short filler words, duplicates
 const STOP_WORDS = new Set(['a','an','the','is','it','in','on','at','to','of','and','or','but','i','my','we','he','she','they','you','be','do','go','no','so','up','as','by','if','me','us','am']);
+
+function getMaskedWord(word: string, guessedLetters: string[]): string[] {
+  return word.split('').map(l => guessedLetters.includes(l) ? l : '_');
+}
 
 function scoreWords(text: string): string[] {
   const words = text.toLowerCase()
     .replace(/[^a-z\s]/g, '')
     .split(/\s+/)
     .filter(w => w.length > 1 && !STOP_WORDS.has(w));
-  return [...new Set(words)]; // deduplicate
+  return [...new Set(words)];
 }
 
 export class GameRoom implements DurableObject {
   private state: DurableObjectState;
   private env: Env;
   private gameState: GameState;
+  private secretWord = '';
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -33,19 +37,20 @@ export class GameRoom implements DurableObject {
       roomId: '',
       status: 'lobby',
       players: [],
-      secretWord: null,
       wordLength: 0,
-      wordMasterId: null,
+      maskedWord: [],
       guessedLetters: [],
       wrongLetters: [],
       maxWrong: 6,
-      hintsUsed: 0,
       speakLog: [],
-      winnerTeam: null,
+      winner: null,
     };
     state.blockConcurrencyWhile(async () => {
-      const saved = await state.storage.get<GameState>('gameState');
-      if (saved) this.gameState = saved;
+      const saved = await state.storage.get<{ gameState: GameState; secretWord: string }>('state');
+      if (saved) {
+        this.gameState = saved.gameState;
+        this.secretWord = saved.secretWord;
+      }
     });
   }
 
@@ -81,7 +86,6 @@ export class GameRoom implements DurableObject {
       case 'start_game':    await this.handleStartGame(); break;
       case 'guess_letter':  await this.handleGuessLetter(playerId, msg.letter); break;
       case 'speak_log':     await this.handleSpeakLog(playerId, msg.text); break;
-      case 'give_hint':     await this.handleGiveHint(playerId); break;
       case 'ping':          this.send(ws, { type: 'pong' }); break;
     }
   }
@@ -103,7 +107,7 @@ export class GameRoom implements DurableObject {
     }
     const playerId = crypto.randomUUID();
     ws.serializeAttachment({ playerId });
-    const player: Player = { id: playerId, name: playerName.trim().slice(0, 20), role: 'guesser', score: 0, isConnected: true };
+    const player: Player = { id: playerId, name: playerName.trim().slice(0, 20), score: 0, isConnected: true };
     this.gameState.players.push(player);
     await this.saveAndBroadcast();
   }
@@ -117,123 +121,59 @@ export class GameRoom implements DurableObject {
 
   private async handleStartGame(): Promise<void> {
     if (this.gameState.status !== 'lobby') return;
-    const connected = this.gameState.players.filter(p => p.isConnected);
-    if (connected.length < 2) return;
+    if (this.gameState.players.filter(p => p.isConnected).length < 2) return;
 
-    // Random word master
-    const masterIdx = Math.floor(Math.random() * connected.length);
-    connected.forEach((p, i) => { p.role = i === masterIdx ? 'word_master' : 'guesser'; });
-    const master = connected[masterIdx];
-    this.gameState.wordMasterId = master.id;
+    this.secretWord = await generateSecretWord(this.env.GEMINI_API_KEY);
+    this.secretWord = this.secretWord.toLowerCase().replace(/[^a-z]/g, '');
 
-    // Get word
-    const word = await generateSecretWord(this.env.GEMINI_API_KEY);
-    this.gameState.secretWord = word.toLowerCase().replace(/[^a-z]/g, '');
-    this.gameState.wordLength = this.gameState.secretWord.length;
     this.gameState.status = 'playing';
+    this.gameState.wordLength = this.secretWord.length;
     this.gameState.guessedLetters = [];
     this.gameState.wrongLetters = [];
-    this.gameState.hintsUsed = 0;
+    this.gameState.maskedWord = getMaskedWord(this.secretWord, []);
     this.gameState.speakLog = [];
-    this.gameState.winnerTeam = null;
+    this.gameState.winner = null;
 
-    await this.state.storage.put('gameState', this.gameState);
-
-    // Broadcast — hide word from guessers
-    const publicState = { ...this.gameState, secretWord: null };
-    for (const ws of this.state.getWebSockets()) {
-      const { playerId } = (ws.deserializeAttachment() ?? { playerId: '' }) as WsAttachment;
-      if (!playerId) continue;
-      this.send(ws, { type: 'room_state', state: publicState, yourPlayerId: playerId });
-      if (playerId === master.id) {
-        this.send(ws, { type: 'secret_word', word: this.gameState.secretWord! });
-      }
-    }
+    await this.saveState();
+    this.broadcastAll((playerId) => ({ type: 'room_state' as const, state: this.gameState, yourPlayerId: playerId }));
 
     await this.env.DB.prepare(
       `INSERT OR REPLACE INTO room_sessions (room_id, secret_word) VALUES (?, ?)`
-    ).bind(this.gameState.roomId, this.gameState.secretWord).run().catch(() => {});
+    ).bind(this.gameState.roomId, this.secretWord).run().catch(() => {});
   }
 
   private async handleGuessLetter(playerId: string, letter: string): Promise<void> {
     if (this.gameState.status !== 'playing') return;
-    // Word master cannot guess
-    if (this.gameState.wordMasterId === playerId) return;
-
     const l = letter.toLowerCase();
-    if (!/^[a-z]$/.test(l)) return;
-    if (this.gameState.guessedLetters.includes(l)) return;
+    if (!/^[a-z]$/.test(l) || this.gameState.guessedLetters.includes(l)) return;
 
-    const word = this.gameState.secretWord ?? '';
-    const correct = word.includes(l);
+    const correct = this.secretWord.includes(l);
     this.gameState.guessedLetters.push(l);
     if (!correct) this.gameState.wrongLetters.push(l);
+    this.gameState.maskedWord = getMaskedWord(this.secretWord, this.gameState.guessedLetters);
 
-    const player = this.gameState.players.find(p => p.id === playerId)!;
-    if (correct) player.score += 1;
+    const player = this.gameState.players.find(p => p.id === playerId);
+    if (player && correct) player.score += 1;
 
-    this.broadcastAll({
-      type: 'letter_result',
-      letter: l,
-      correct,
+    this.broadcastAll(() => ({
+      type: 'letter_result' as const,
+      letter: l, correct,
+      maskedWord: this.gameState.maskedWord,
       guessedLetters: this.gameState.guessedLetters,
       wrongLetters: this.gameState.wrongLetters,
       playerId,
-      playerName: player.name,
-    });
+      playerName: player?.name ?? '',
+    }));
 
-    // Check win: all letters guessed
-    const allGuessed = word.split('').every(c => this.gameState.guessedLetters.includes(c));
-    if (allGuessed) {
-      await this.endGame('guessers');
-      return;
-    }
-
-    // Check lose: 6 wrong guesses
-    if (this.gameState.wrongLetters.length >= this.gameState.maxWrong) {
-      await this.endGame('master');
-      return;
-    }
-
-    await this.saveState();
-  }
-
-  private async handleGiveHint(playerId: string): Promise<void> {
-    if (this.gameState.status !== 'playing') return;
-    if (this.gameState.wordMasterId !== playerId) return;
-    if (this.gameState.hintsUsed >= 3) return; // max 3 hints
-
-    const word = this.gameState.secretWord ?? '';
-    // Pick a random unrevealed letter to hint
-    const unrevealed = word.split('').filter(
-      (l, i) => word.indexOf(l) === i && !this.gameState.guessedLetters.includes(l)
-    );
-    if (unrevealed.length === 0) return;
-
-    const hintLetter = unrevealed[Math.floor(Math.random() * unrevealed.length)];
-    this.gameState.hintsUsed += 1;
-    this.gameState.guessedLetters.push(hintLetter);
-
-    this.broadcastAll({
-      type: 'hint_given',
-      letter: hintLetter,
-      hintsUsed: this.gameState.hintsUsed,
-    });
-
-    // Check if hint completed the word
-    const allGuessed = word.split('').every(c => this.gameState.guessedLetters.includes(c));
-    if (allGuessed) {
-      await this.endGame('guessers');
-      return;
-    }
+    const allGuessed = this.secretWord.split('').every(c => this.gameState.guessedLetters.includes(c));
+    if (allGuessed) { await this.endGame('players'); return; }
+    if (this.gameState.wrongLetters.length >= this.gameState.maxWrong) { await this.endGame('house'); return; }
 
     await this.saveState();
   }
 
   private async handleSpeakLog(playerId: string, text: string): Promise<void> {
-    if (this.gameState.status !== 'playing') return;
-    if (!text.trim()) return;
-
+    if (this.gameState.status !== 'playing' || !text.trim()) return;
     const player = this.gameState.players.find(p => p.id === playerId);
     if (!player) return;
 
@@ -241,38 +181,18 @@ export class GameRoom implements DurableObject {
     const score = words.length;
     player.score += score;
 
-    const entry: SpeakEntry = {
-      playerId,
-      playerName: player.name,
-      text: text.trim(),
-      words,
-      score,
-      timestamp: Date.now(),
-    };
+    const entry: SpeakEntry = { playerId, playerName: player.name, text: text.trim(), words, score, timestamp: Date.now() };
     this.gameState.speakLog.push(entry);
-    this.broadcastAll({ type: 'speak_logged', entry });
+    this.broadcastAll(() => ({ type: 'speak_logged' as const, entry }));
     await this.saveState();
   }
 
-  private async endGame(winnerTeam: 'guessers' | 'master'): Promise<void> {
+  private async endGame(winner: 'players' | 'house'): Promise<void> {
     this.gameState.status = 'finished';
-    this.gameState.winnerTeam = winnerTeam;
-
-    const scores = this.gameState.players
-      .map(p => ({ name: p.name, score: p.score }))
-      .sort((a, b) => b.score - a.score);
-
-    this.broadcastAll({
-      type: 'game_over',
-      winnerTeam,
-      secretWord: this.gameState.secretWord ?? '',
-      scores,
-    });
-
-    await this.env.DB.prepare(
-      `UPDATE room_sessions SET winner_name = ?, ended_at = CURRENT_TIMESTAMP WHERE room_id = ?`
-    ).bind(winnerTeam === 'guessers' ? 'guessers_team' : 'word_master', this.gameState.roomId).run().catch(() => {});
-
+    this.gameState.winner = winner;
+    this.gameState.maskedWord = this.secretWord.split(''); // reveal full word
+    const scores = this.gameState.players.map(p => ({ name: p.name, score: p.score })).sort((a, b) => b.score - a.score);
+    this.broadcastAll(() => ({ type: 'game_over' as const, winner, secretWord: this.secretWord, scores }));
     await this.saveState();
   }
 
@@ -280,20 +200,19 @@ export class GameRoom implements DurableObject {
     try { ws.send(JSON.stringify(msg)); } catch { /* closed */ }
   }
 
-  private broadcastAll(msg: ServerMessage): void {
-    for (const ws of this.state.getWebSockets()) this.send(ws, msg);
+  private broadcastAll(msgFn: (playerId: string) => ServerMessage): void {
+    for (const ws of this.state.getWebSockets()) {
+      const { playerId } = (ws.deserializeAttachment() ?? { playerId: '' }) as WsAttachment;
+      if (playerId) this.send(ws, msgFn(playerId));
+    }
   }
 
   private async saveState(): Promise<void> {
-    await this.state.storage.put('gameState', this.gameState);
+    await this.state.storage.put('state', { gameState: this.gameState, secretWord: this.secretWord });
   }
 
   private async saveAndBroadcast(): Promise<void> {
     await this.saveState();
-    const state = { ...this.gameState, secretWord: null };
-    for (const ws of this.state.getWebSockets()) {
-      const { playerId } = (ws.deserializeAttachment() ?? { playerId: '' }) as WsAttachment;
-      if (playerId) this.send(ws, { type: 'room_state', state, yourPlayerId: playerId });
-    }
+    this.broadcastAll((playerId) => ({ type: 'room_state', state: this.gameState, yourPlayerId: playerId }));
   }
 }

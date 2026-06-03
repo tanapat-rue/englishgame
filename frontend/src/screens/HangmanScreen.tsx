@@ -6,7 +6,6 @@ import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 interface SharedGameState {
   gameState: GameState | null;
   myId: string | null;
-  secretWord: string | null;
 }
 
 interface Props {
@@ -28,13 +27,12 @@ const QWERTY_ROWS = [
 export default function HangmanScreen({ playerName, shared, send, connected, onRegisterHandler, onLeave }: Props) {
   const [gameState, setGameState] = useState<GameState | null>(shared.gameState);
   const [myId] = useState<string | null>(shared.myId);
-  const [secretWord, setSecretWord] = useState<string | null>(shared.secretWord);
   const [speakLog, setSpeakLog] = useState<SpeakEntry[]>([]);
+  const [maskedWord, setMaskedWord] = useState<string[]>(shared.gameState?.maskedWord ?? []);
   const [guessedLetters, setGuessedLetters] = useState<string[]>(shared.gameState?.guessedLetters ?? []);
   const [wrongLetters, setWrongLetters] = useState<string[]>(shared.gameState?.wrongLetters ?? []);
-  const [hintsUsed, setHintsUsed] = useState(shared.gameState?.hintsUsed ?? 0);
-  const [gameOver, setGameOver] = useState<{ winnerTeam: 'guessers' | 'master'; secretWord: string; scores: Array<{ name: string; score: number }> } | null>(null);
-  const [lastEvent, setLastEvent] = useState<{ type: 'correct' | 'wrong' | 'hint'; label: string } | null>(null);
+  const [gameOver, setGameOver] = useState<{ winner: 'players' | 'house'; secretWord: string; scores: Array<{ name: string; score: number }> } | null>(null);
+  const [lastEvent, setLastEvent] = useState<{ type: 'correct' | 'wrong'; label: string } | null>(null);
   const [newLetters, setNewLetters] = useState<Set<string>>(new Set());
   const [audioBlocked, setAudioBlocked] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -59,7 +57,6 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
     myId, onSendSignal: handleSendSignal, iceServers,
   });
 
-  // VU meter — RAF driven, no React state
   const localBarRef = useRef<HTMLDivElement>(null);
   const remoteBarRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   useEffect(() => {
@@ -89,31 +86,21 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
       switch (msg.type) {
         case 'room_state':
           setGameState(msg.state);
+          setMaskedWord(msg.state.maskedWord);
           setGuessedLetters(msg.state.guessedLetters);
           setWrongLetters(msg.state.wrongLetters);
-          setHintsUsed(msg.state.hintsUsed);
-          break;
-        case 'secret_word':
-          setSecretWord(msg.word);
           break;
         case 'letter_result':
+          setMaskedWord(msg.maskedWord);
           setGuessedLetters(msg.guessedLetters);
           setWrongLetters(msg.wrongLetters);
           if (msg.correct) {
             setNewLetters(prev => new Set(prev).add(msg.letter));
             setTimeout(() => setNewLetters(prev => { const s = new Set(prev); s.delete(msg.letter); return s; }), 600);
-            setLastEvent({ type: 'correct', label: `✅ ${msg.letter.toUpperCase()} — ${msg.playerName}!` });
+            setLastEvent({ type: 'correct', label: `✅  "${msg.letter.toUpperCase()}"  —  ${msg.playerName}!` });
           } else {
-            setLastEvent({ type: 'wrong', label: `❌ No "${msg.letter.toUpperCase()}"` });
+            setLastEvent({ type: 'wrong', label: `❌  No "${msg.letter.toUpperCase()}"` });
           }
-          setTimeout(() => setLastEvent(null), 2000);
-          break;
-        case 'hint_given':
-          setGuessedLetters(prev => [...prev, msg.letter]);
-          setHintsUsed(msg.hintsUsed);
-          setNewLetters(prev => new Set(prev).add(msg.letter));
-          setTimeout(() => setNewLetters(prev => { const s = new Set(prev); s.delete(msg.letter); return s; }), 600);
-          setLastEvent({ type: 'hint', label: `💡 Hint: "${msg.letter.toUpperCase()}"` });
           setTimeout(() => setLastEvent(null), 2000);
           break;
         case 'speak_logged':
@@ -129,7 +116,6 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
     });
   }, [onRegisterHandler]);
 
-  // Mic init
   useEffect(() => { initLocalStream(); }, [initLocalStream]);
   useEffect(() => {
     const unlock = () => {
@@ -146,7 +132,6 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
     };
   }, [initLocalStream]);
 
-  // WebRTC connections
   useEffect(() => {
     if (!streamReady || !myId || !gameState) return;
     gameState.players.forEach(p => {
@@ -158,22 +143,14 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [speakLog]);
 
-  const isWordMaster = gameState?.players.find(p => p.id === myId)?.role === 'word_master';
-  const wordLength = gameState?.wordLength ?? 0;
-  const wordLetters = isWordMaster && secretWord ? secretWord.split('') : Array.from({ length: wordLength }, () => '');
   const wrongCount = wrongLetters.length;
   const livesLeft = (gameState?.maxWrong ?? 6) - wrongCount;
   const myScore = gameState?.players.find(p => p.id === myId)?.score ?? 0;
 
   const handleGuessLetter = useCallback((letter: string) => {
-    if (guessedLetters.includes(letter) || isWordMaster) return;
+    if (guessedLetters.includes(letter)) return;
     send({ type: 'guess_letter', letter });
-  }, [guessedLetters, isWordMaster, send]);
-
-  const handleGiveHint = useCallback(() => {
-    if (hintsUsed >= 3) return;
-    send({ type: 'give_hint' });
-  }, [hintsUsed, send]);
+  }, [guessedLetters, send]);
 
   const handlePressStart = useCallback(() => {
     if (isPressingRef.current) return;
@@ -198,7 +175,6 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
   return (
     <div className="h-screen bg-gray-950 flex flex-col overflow-hidden">
 
-      {/* Hidden audio */}
       {Array.from(remoteStreams.entries()).map(([pid, stream]) => (
         <RemoteAudio key={pid} stream={stream} onBlocked={() => setAudioBlocked(true)} />
       ))}
@@ -218,178 +194,139 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
       )}
 
       {/* ═══ HEADER ═══ */}
-      <div className="flex-shrink-0 flex items-center justify-between px-4 pt-3 pb-1">
-        <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold ${
-          isWordMaster ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
-        }`}>
-          <span>{isWordMaster ? '🎯' : '🔍'}</span>
-          <span>{isWordMaster ? 'Word Master' : 'Guesser'}</span>
-        </div>
-
+      <div className="flex-shrink-0 flex items-center justify-between px-4 pt-3 pb-2">
         {/* Lives */}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5">
           {Array.from({ length: 6 }).map((_, i) => (
-            <span key={i} className={`text-lg transition-all duration-300 ${i < livesLeft ? 'opacity-100' : 'opacity-20 scale-75'}`}>
+            <span key={i} className={`text-xl transition-all duration-300 ${i < livesLeft ? 'opacity-100' : 'opacity-15 grayscale scale-75'}`}>
               ❤️
             </span>
           ))}
         </div>
-
+        {/* My score */}
         <div className="text-right">
-          <p className="text-yellow-400 font-black text-lg leading-none">{myScore}</p>
-          <p className="text-gray-600 text-[10px]">pts</p>
+          <p className="text-yellow-400 font-black text-2xl leading-none">{myScore}</p>
+          <p className="text-gray-600 text-[10px]">your pts</p>
         </div>
       </div>
 
       {/* ═══ PLAYERS STRIP ═══ */}
-      <div className="flex-shrink-0 px-3 pb-1 flex gap-1.5 overflow-x-auto">
-        {gameState?.players.filter(p => p.isConnected).map(p => {
-          const level = remoteLevelForPlayer(p.id, myId, remoteBarRefs);
-          return (
-            <div key={p.id} className={`flex-shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-lg ${p.id === myId ? 'bg-indigo-500/20' : 'bg-white/5'}`}>
-              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 ${p.role === 'word_master' ? 'bg-amber-500' : 'bg-indigo-600'} text-white`}>
-                {p.name.charAt(0).toUpperCase()}
-              </div>
-              <span className="text-white text-[11px] font-medium">{p.id === myId ? 'You' : p.name}</span>
-              <span className="text-yellow-400 text-[10px]">{p.score}</span>
-              {/* Speaking indicator — driven by a data attr the RAF loop updates */}
-              <div className="w-4 h-1.5 bg-gray-800 rounded-full overflow-hidden flex-shrink-0">
-                <div
-                  data-player-bar={p.id}
-                  ref={el => { if (el) remoteBarRefs.current.set(p.id, el); else remoteBarRefs.current.delete(p.id); }}
-                  className="h-full rounded-full transition-none"
-                  style={{ width: '0%' }}
-                />
-              </div>
+      <div className="flex-shrink-0 px-3 pb-2 flex gap-2 overflow-x-auto">
+        {gameState?.players.filter(p => p.isConnected).map(p => (
+          <div key={p.id} className={`flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl ${p.id === myId ? 'bg-indigo-500/20 border border-indigo-500/30' : 'bg-white/5'}`}>
+            <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] font-bold text-white">
+              {p.name.charAt(0).toUpperCase()}
             </div>
-          );
-        })}
+            <div>
+              <p className="text-white text-xs font-medium leading-none">{p.id === myId ? 'You' : p.name}</p>
+              <p className="text-yellow-400 text-[10px] leading-none">{p.score}pts</p>
+            </div>
+            {/* Speaking VU bar */}
+            <div className="w-5 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+              <div
+                ref={el => { if (el) remoteBarRefs.current.set(p.id, el); else remoteBarRefs.current.delete(p.id); }}
+                className="h-full rounded-full transition-none"
+                style={{ width: '0%' }}
+              />
+            </div>
+          </div>
+        ))}
       </div>
 
-      {/* ═══ HANGMAN + WORD ═══ */}
-      <div className="flex-shrink-0 flex items-center justify-between px-4 py-1">
-        {/* Hangman drawing */}
+      {/* ═══ HANGMAN + EVENT FLASH ═══ */}
+      <div className="flex-shrink-0 flex items-center justify-between px-4">
         <HangmanDrawing wrongCount={wrongCount} />
-
-        {/* Word + event flash */}
-        <div className="flex-1 flex flex-col items-center justify-center gap-3 pl-2">
-          {/* Secret word (master) or blank slots (guesser) */}
-          {isWordMaster ? (
-            <div className="bg-amber-900/20 border border-amber-600/30 rounded-xl px-4 py-2 text-center w-full">
-              <p className="text-amber-400/60 text-[10px] mb-1">Secret Word</p>
-              <p className="text-amber-200 text-2xl font-black tracking-widest uppercase">{secretWord}</p>
-            </div>
-          ) : (
-            <div className="flex flex-wrap justify-center gap-1.5">
-              {wordLetters.map((letter, i) => (
-                <LetterSlot key={i} letter={letter} revealed={letter !== '' && guessedLetters.includes(letter)} isNew={newLetters.has(letter)} />
-              ))}
-            </div>
-          )}
-
-          {/* Event flash */}
-          {lastEvent && (
-            <div className={`px-4 py-1.5 rounded-full text-sm font-bold text-center ${
-              lastEvent.type === 'correct' ? 'bg-green-500/20 text-green-300 border border-green-500/30' :
-              lastEvent.type === 'hint' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' :
-              'bg-red-500/20 text-red-300 border border-red-500/30'
+        <div className="flex-1 pl-4">
+          {lastEvent ? (
+            <div className={`px-3 py-2 rounded-xl text-sm font-bold text-center ${
+              lastEvent.type === 'correct' ? 'bg-green-500/20 text-green-300 border border-green-500/30' : 'bg-red-500/20 text-red-300 border border-red-500/30'
             }`}>
               {lastEvent.label}
             </div>
-          )}
-
-          {/* Wrong letters */}
-          {wrongLetters.length > 0 && (
-            <div className="flex flex-wrap justify-center gap-1">
-              {wrongLetters.map(l => (
-                <span key={l} className="w-6 h-6 rounded-md bg-red-900/40 border border-red-600/40 text-red-400 text-xs font-bold flex items-center justify-center uppercase">
-                  {l}
-                </span>
-              ))}
-            </div>
+          ) : (
+            <p className="text-gray-600 text-xs text-center">Tap a letter to guess</p>
           )}
         </div>
       </div>
 
-      {/* ═══ WORD MASTER HINT ═══ */}
-      {isWordMaster && (
-        <div className="flex-shrink-0 px-4 pb-1">
-          <button
-            onClick={handleGiveHint}
-            disabled={hintsUsed >= 3}
-            className={`w-full py-2.5 rounded-xl font-bold text-sm transition-all ${
-              hintsUsed >= 3
-                ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
-                : 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white active:scale-[0.98]'
-            }`}
-          >
-            💡 Give Hint ({3 - hintsUsed} left) — reveals a random letter
-          </button>
-        </div>
-      )}
-
-      {/* ═══ KEYBOARD (guessers) ═══ */}
-      {!isWordMaster && (
-        <div className="flex-shrink-0 px-2 pb-1 space-y-1">
-          {QWERTY_ROWS.map((row, ri) => (
-            <div key={ri} className="flex justify-center gap-1">
-              {row.map(letter => {
-                const isWrong = wrongLetters.includes(letter);
-                const isCorrect = guessedLetters.includes(letter) && !isWrong;
-                const isUsed = guessedLetters.includes(letter);
-                return (
-                  <button
-                    key={letter}
-                    onClick={() => handleGuessLetter(letter)}
-                    disabled={isUsed}
-                    className={`w-9 h-10 rounded-lg font-bold text-sm uppercase select-none transition-all duration-150 ${
-                      isWrong ? 'bg-red-900/30 text-red-600 border border-red-800/30' :
-                      isCorrect ? 'bg-green-900/30 text-green-600 border border-green-800/30' :
-                      'bg-gray-800 text-white border border-gray-700 active:scale-90 active:bg-indigo-600'
-                    }`}
-                  >
-                    {letter}
-                  </button>
-                );
-              })}
-            </div>
+      {/* ═══ WORD DISPLAY ═══ */}
+      <div className="flex-shrink-0 px-4 pb-2">
+        <div className="flex flex-wrap justify-center gap-2">
+          {maskedWord.map((letter, i) => (
+            <LetterSlot key={i} letter={letter} revealed={letter !== '_'} isNew={newLetters.has(letter) && letter !== '_'} />
           ))}
         </div>
-      )}
+        {wrongLetters.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-2">
+            <span className="text-gray-600 text-xs self-center">Wrong:</span>
+            {wrongLetters.map(l => (
+              <span key={l} className="w-6 h-6 rounded-md bg-red-900/30 border border-red-700/40 text-red-400 text-xs font-bold flex items-center justify-center uppercase">
+                {l}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
 
-      {/* ═══ VOICE SECTION ═══ */}
-      <div className="flex-1 flex flex-col min-h-0 px-3 pb-3 pt-1 gap-2">
+      {/* ═══ KEYBOARD ═══ */}
+      <div className="flex-shrink-0 px-2 pb-2 space-y-1">
+        {QWERTY_ROWS.map((row, ri) => (
+          <div key={ri} className="flex justify-center gap-1">
+            {row.map(letter => {
+              const isWrong = wrongLetters.includes(letter);
+              const isCorrect = guessedLetters.includes(letter) && !isWrong;
+              const isUsed = guessedLetters.includes(letter);
+              return (
+                <button
+                  key={letter}
+                  onClick={() => handleGuessLetter(letter)}
+                  disabled={isUsed}
+                  className={`w-9 h-10 rounded-lg font-bold text-sm uppercase select-none transition-all duration-150 ${
+                    isWrong ? 'bg-red-900/20 text-red-700 border border-red-900/30' :
+                    isCorrect ? 'bg-green-900/20 text-green-600 border border-green-900/30' :
+                    'bg-gray-800 text-white border border-gray-700 active:scale-90 active:bg-indigo-600 hover:bg-gray-700'
+                  }`}
+                >
+                  {letter}
+                </button>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+
+      {/* ═══ VOICE ═══ */}
+      <div className="flex-1 flex flex-col min-h-0 px-3 pb-3 gap-1.5">
         {/* Log */}
         <div className="flex-1 overflow-y-auto space-y-1.5 min-h-0">
-          {speakLog.length === 0 ? (
-            <p className="text-gray-600 text-xs text-center pt-2">Discuss clues with your team — hold to talk</p>
-          ) : speakLog.map((entry, i) => (
-            <div key={i} className={`rounded-xl px-3 py-2 ${entry.playerName === playerName ? 'bg-indigo-950/60 border border-indigo-800/40 ml-6' : 'bg-gray-900 mr-6'}`}>
-              <div className="flex justify-between items-center mb-0.5">
-                <span className="text-gray-400 text-[10px] font-semibold">{entry.playerName === playerName ? 'You' : entry.playerName}</span>
-                <span className="text-yellow-500 text-[10px] font-bold">+{entry.score}pts</span>
-              </div>
-              <p className="text-white text-sm">{entry.text}</p>
-              {entry.words.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-1">
-                  {entry.words.map(w => (
-                    <span key={w} className="text-emerald-400/60 text-[10px] bg-emerald-900/20 px-1.5 rounded-full">{w}</span>
-                  ))}
+          {speakLog.length === 0
+            ? <p className="text-gray-700 text-xs text-center pt-2">Hold to talk — discuss with your team!</p>
+            : speakLog.map((entry, i) => (
+                <div key={i} className={`rounded-xl px-3 py-2 ${entry.playerName === playerName ? 'bg-indigo-950/70 border border-indigo-800/40 ml-4' : 'bg-gray-900 mr-4'}`}>
+                  <div className="flex justify-between items-center mb-0.5">
+                    <span className="text-gray-500 text-[10px] font-semibold">{entry.playerName === playerName ? 'You' : entry.playerName}</span>
+                    <span className="text-yellow-500 text-[10px] font-bold">+{entry.score}pts</span>
+                  </div>
+                  <p className="text-white text-sm">{entry.text}</p>
+                  {entry.words.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {entry.words.map(w => (
+                        <span key={w} className="text-emerald-400/60 text-[10px] bg-emerald-900/20 px-1.5 rounded-full">{w}</span>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          ))}
+              ))
+          }
           <div ref={logEndRef} />
         </div>
 
-        {/* Transcript preview */}
         {transcript && (
           <div className="flex-shrink-0 bg-white/5 rounded-xl px-3 py-2 text-white text-sm border border-white/10">
             {transcript}
           </div>
         )}
 
-        {/* Hold to talk */}
         <button
           onPointerDown={handlePressStart}
           onPointerUp={handlePressEnd}
@@ -406,8 +343,8 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
             {isListening ? (
               <>
                 <span className="relative flex h-2.5 w-2.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" />
+                  <span className="animate-ping absolute h-full w-full rounded-full bg-red-400 opacity-75" />
+                  <span className="relative rounded-full h-2.5 w-2.5 bg-red-500" />
                 </span>
                 Recording...
               </>
@@ -423,12 +360,10 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
         <summary className="px-3 py-1 text-[10px] text-gray-700 cursor-pointer">
           debug ({remoteStreams.size} peers, mic {streamReady ? '✅' : '❌'})
         </summary>
-        <div className="px-3 pt-1 pb-1 space-y-0.5">
-          <div className="flex items-center gap-2">
-            <span className="text-gray-700 text-[9px] w-8">local</span>
-            <div className="flex-1 h-1 bg-gray-900 rounded-full overflow-hidden">
-              <div ref={localBarRef} className="h-full rounded-full" style={{ width: '0%' }} />
-            </div>
+        <div className="px-3 py-1 flex items-center gap-2">
+          <span className="text-gray-700 text-[9px] w-8">local</span>
+          <div className="flex-1 h-1 bg-gray-900 rounded-full overflow-hidden">
+            <div ref={localBarRef} className="h-full rounded-full" style={{ width: '0%' }} />
           </div>
         </div>
         <div className="px-3 pb-1 max-h-16 overflow-y-auto font-mono text-[9px] text-green-500/50">
@@ -439,46 +374,28 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
   );
 }
 
-// dummy to avoid unused import error — bar refs are set by the RAF loop
-function remoteLevelForPlayer(_pid: string, _myId: string | null, _refs: React.MutableRefObject<Map<string, HTMLDivElement>>) {
-  return 0;
-}
-
 // ═══ HANGMAN SVG ══════════════════════════════════════════════════════════════
 
 function HangmanDrawing({ wrongCount }: { wrongCount: number }) {
-  const parts = [
-    // 1: head
-    <circle key="head" cx="90" cy="38" r="14" stroke="#ef4444" strokeWidth="3" fill="none" />,
-    // 2: body
-    <line key="body" x1="90" y1="52" x2="90" y2="100" stroke="#ef4444" strokeWidth="3" strokeLinecap="round" />,
-    // 3: left arm
-    <line key="la" x1="90" y1="65" x2="65" y2="85" stroke="#ef4444" strokeWidth="3" strokeLinecap="round" />,
-    // 4: right arm
-    <line key="ra" x1="90" y1="65" x2="115" y2="85" stroke="#ef4444" strokeWidth="3" strokeLinecap="round" />,
-    // 5: left leg
-    <line key="ll" x1="90" y1="100" x2="65" y2="130" stroke="#ef4444" strokeWidth="3" strokeLinecap="round" />,
-    // 6: right leg
-    <line key="rl" x1="90" y1="100" x2="115" y2="130" stroke="#ef4444" strokeWidth="3" strokeLinecap="round" />,
-  ];
-
   return (
-    <svg width="150" height="155" viewBox="0 0 150 155" className="flex-shrink-0">
-      {/* Gallows — always visible */}
-      <line x1="15" y1="148" x2="135" y2="148" stroke="#4b5563" strokeWidth="3" strokeLinecap="round" />
-      <line x1="40" y1="148" x2="40" y2="10" stroke="#4b5563" strokeWidth="3" strokeLinecap="round" />
-      <line x1="40" y1="10" x2="90" y2="10" stroke="#4b5563" strokeWidth="3" strokeLinecap="round" />
-      <line x1="90" y1="10" x2="90" y2="24" stroke="#4b5563" strokeWidth="3" strokeLinecap="round" />
-      {/* Body parts revealed progressively */}
-      {parts.slice(0, wrongCount).map(p => p)}
-      {/* Face details on wrong=1 */}
+    <svg width="130" height="145" viewBox="0 0 130 145" className="flex-shrink-0">
+      <line x1="10" y1="138" x2="120" y2="138" stroke="#4b5563" strokeWidth="3" strokeLinecap="round" />
+      <line x1="35" y1="138" x2="35" y2="8" stroke="#4b5563" strokeWidth="3" strokeLinecap="round" />
+      <line x1="35" y1="8" x2="80" y2="8" stroke="#4b5563" strokeWidth="3" strokeLinecap="round" />
+      <line x1="80" y1="8" x2="80" y2="22" stroke="#4b5563" strokeWidth="3" strokeLinecap="round" />
+      {wrongCount >= 1 && <circle cx="80" cy="33" r="11" stroke="#ef4444" strokeWidth="2.5" fill="none" />}
+      {wrongCount >= 1 && <circle cx="76" cy="31" r="1.5" fill="#ef4444" />}
+      {wrongCount >= 1 && <circle cx="84" cy="31" r="1.5" fill="#ef4444" />}
       {wrongCount >= 1 && (
-        <>
-          <circle cx="85" cy="34" r="2" fill="#ef4444" />
-          <circle cx="95" cy="34" r="2" fill="#ef4444" />
-          <path d={wrongCount >= 6 ? "M 84 44 Q 90 40 96 44" : "M 84 42 Q 90 46 96 42"} stroke="#ef4444" strokeWidth="2" fill="none" strokeLinecap="round" />
-        </>
+        wrongCount >= 6
+          ? <path d="M 76 39 Q 80 35 84 39" stroke="#ef4444" strokeWidth="1.5" fill="none" strokeLinecap="round" />
+          : <path d="M 76 37 Q 80 41 84 37" stroke="#ef4444" strokeWidth="1.5" fill="none" strokeLinecap="round" />
       )}
+      {wrongCount >= 2 && <line x1="80" y1="44" x2="80" y2="84" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round" />}
+      {wrongCount >= 3 && <line x1="80" y1="57" x2="62" y2="74" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round" />}
+      {wrongCount >= 4 && <line x1="80" y1="57" x2="98" y2="74" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round" />}
+      {wrongCount >= 5 && <line x1="80" y1="84" x2="62" y2="110" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round" />}
+      {wrongCount >= 6 && <line x1="80" y1="84" x2="98" y2="110" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round" />}
     </svg>
   );
 }
@@ -487,16 +404,10 @@ function HangmanDrawing({ wrongCount }: { wrongCount: number }) {
 
 function LetterSlot({ letter, revealed, isNew }: { letter: string; revealed: boolean; isNew: boolean }) {
   return (
-    <div className={`w-8 h-10 flex flex-col items-center justify-end pb-0.5 border-b-2 transition-colors duration-200 ${
-      revealed ? 'border-green-400' : 'border-gray-600'
-    }`}>
+    <div className={`w-8 h-10 flex items-end justify-center pb-0.5 border-b-2 ${revealed ? 'border-green-400' : 'border-gray-600'}`}>
       <span className={`text-lg font-black uppercase transition-all duration-300 ${
-        revealed
-          ? `text-white ${isNew ? 'scale-125 text-green-300' : 'scale-100'}`
-          : 'scale-0 text-transparent'
-      }`}>
-        {letter}
-      </span>
+        revealed ? `text-white ${isNew ? 'scale-125 text-green-300' : 'scale-100'}` : 'text-transparent scale-0'
+      }`}>{letter}</span>
     </div>
   );
 }
@@ -519,23 +430,24 @@ function RemoteAudio({ stream, onBlocked }: { stream: MediaStream; onBlocked: ()
 // ═══ GAME OVER ════════════════════════════════════════════════════════════════
 
 function GameOverScreen({ gameOver, onLeave }: {
-  gameOver: { winnerTeam: 'guessers' | 'master'; secretWord: string; scores: Array<{ name: string; score: number }> };
+  gameOver: { winner: 'players' | 'house'; secretWord: string; scores: Array<{ name: string; score: number }> };
   onLeave: () => void;
 }) {
-  const win = gameOver.winnerTeam === 'guessers';
+  const win = gameOver.winner === 'players';
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-950 via-gray-900 to-gray-950 flex flex-col items-center justify-center p-6">
       <div className="w-full max-w-sm space-y-8">
         <div className="text-center space-y-4">
           <div className={`text-8xl ${win ? 'animate-bounce' : ''}`}>{win ? '🎉' : '💀'}</div>
-          <h2 className="text-3xl font-black text-white">{win ? 'Guessers Win! 🎊' : 'Word Master Wins!'}</h2>
-          <div className="inline-flex items-center gap-3 bg-white/10 backdrop-blur-sm rounded-2xl px-6 py-3 border border-white/20">
-            <span className="text-gray-400">The word was</span>
+          <h2 className="text-3xl font-black text-white">{win ? 'You got it! 🎊' : 'Hanged! 😵'}</h2>
+          <div className="inline-flex items-center gap-3 bg-white/10 rounded-2xl px-6 py-3 border border-white/20">
+            <span className="text-gray-400 text-sm">The word was</span>
             <span className="text-white font-black text-2xl tracking-widest uppercase">{gameOver.secretWord}</span>
           </div>
         </div>
 
         <div className="space-y-2">
+          <p className="text-gray-500 text-xs font-bold uppercase tracking-widest text-center">Scores</p>
           {gameOver.scores.map((s, i) => (
             <div key={s.name} className={`flex items-center gap-3 rounded-2xl px-4 py-3 ${
               i === 0 ? 'bg-gradient-to-r from-yellow-900/40 to-amber-900/30 border border-yellow-600/40' : 'bg-white/5 border border-white/10'
