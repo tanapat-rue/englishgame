@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import LobbyScreen from './screens/LobbyScreen';
-import GameScreen from './screens/GameScreen';
+import HangmanScreen from './screens/HangmanScreen';
 import { useWebSocket } from './hooks/useWebSocket';
 import { GameState, ServerMessage } from './types';
 
@@ -67,7 +67,7 @@ export default function App() {
         shared={shared}
         send={send}
         connected={connected}
-        onRegisterHandler={(fn) => { screenHandlerRef.current = fn; }}
+        onRegisterHandler={(fn: (msg: ServerMessage) => void) => { screenHandlerRef.current = fn; }}
         onLeave={handleLeaveGame}
       />
     );
@@ -75,13 +75,13 @@ export default function App() {
 
   if (screen === 'game' && session) {
     return (
-      <GameScreen
+      <HangmanScreen
         roomId={session.roomId}
         playerName={session.playerName}
         shared={shared}
         send={send}
         connected={connected}
-        onRegisterHandler={(fn) => { screenHandlerRef.current = fn; }}
+        onRegisterHandler={(fn: (msg: ServerMessage) => void) => { screenHandlerRef.current = fn; }}
         onLeave={handleLeaveGame}
       />
     );
@@ -126,8 +126,8 @@ function HomeScreen({ onJoin }: { onJoin: (roomId: string, name: string) => void
         {/* Logo */}
         <div className="text-center space-y-3">
           <div className="text-6xl">🎯</div>
-          <h1 className="text-4xl font-black text-white tracking-tight">20 Questions</h1>
-          <p className="text-indigo-300/70 text-sm font-medium">Practice English through conversation</p>
+          <h1 className="text-4xl font-black text-white tracking-tight">Hangman</h1>
+          <p className="text-indigo-300/70 text-sm font-medium">Practice English through voice & guessing</p>
         </div>
 
         {/* Card */}

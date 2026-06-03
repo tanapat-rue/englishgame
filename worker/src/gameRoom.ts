@@ -1,5 +1,5 @@
-import { GameState, Player, ClientMessage, ServerMessage } from './types';
-import { generateSecretWord, evaluateQuestion } from './gemini';
+import { GameState, Player, ClientMessage, ServerMessage, SpeakEntry } from './types';
+import { generateSecretWord } from './gemini';
 
 export interface Env {
   DB: D1Database;
@@ -8,6 +8,17 @@ export interface Env {
 
 interface WsAttachment {
   playerId: string;
+}
+
+// Stripped words to score: remove punctuation, short filler words, duplicates
+const STOP_WORDS = new Set(['a','an','the','is','it','in','on','at','to','of','and','or','but','i','my','we','he','she','they','you','be','do','go','no','so','up','as','by','if','me','us','am']);
+
+function scoreWords(text: string): string[] {
+  const words = text.toLowerCase()
+    .replace(/[^a-z\s]/g, '')
+    .split(/\s+/)
+    .filter(w => w.length > 1 && !STOP_WORDS.has(w));
+  return [...new Set(words)]; // deduplicate
 }
 
 export class GameRoom implements DurableObject {
@@ -23,15 +34,15 @@ export class GameRoom implements DurableObject {
       status: 'lobby',
       players: [],
       secretWord: null,
-      giverId: null,
-      currentGuesserId: null,
-      questionsLeft: 20,
-      questionLog: [],
-      winnerName: null,
-      aiEnabled: false,
+      wordLength: 0,
+      wordMasterId: null,
+      guessedLetters: [],
+      wrongLetters: [],
+      maxWrong: 6,
+      hintsUsed: 0,
+      speakLog: [],
+      winnerTeam: null,
     };
-    // Restore persisted state before handling any request or message.
-    // blockConcurrencyWhile ensures no fetch/webSocketMessage runs until this completes.
     state.blockConcurrencyWhile(async () => {
       const saved = await state.storage.get<GameState>('gameState');
       if (saved) this.gameState = saved;
@@ -41,20 +52,15 @@ export class GameRoom implements DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const roomId = url.searchParams.get('roomId') ?? 'unknown';
-
-    if (!this.gameState.roomId) {
-      this.gameState.roomId = roomId;
-    }
+    if (!this.gameState.roomId) this.gameState.roomId = roomId;
 
     if (request.headers.get('Upgrade') === 'websocket') {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.state.acceptWebSocket(server);
-      // Store empty playerId; filled in when client sends join_room
       server.serializeAttachment({ playerId: '' });
       return new Response(null, { status: 101, webSocket: client });
     }
-
     return new Response('Not found', { status: 404 });
   }
 
@@ -70,27 +76,13 @@ export class GameRoom implements DurableObject {
     const { playerId } = (ws.deserializeAttachment() ?? { playerId: '' }) as WsAttachment;
 
     switch (msg.type) {
-      case 'join_room':
-        await this.handleJoin(ws, msg.playerName);
-        break;
-      case 'webrtc_signal':
-        this.handleSignal(playerId, msg.targetId, msg.signalData);
-        break;
-      case 'start_game':
-        await this.handleStartGame(playerId);
-        break;
-      case 'ask_question':
-        await this.handleAskQuestion(playerId, msg.text);
-        break;
-      case 'giver_answer':
-        this.handleGiverAnswer(playerId, msg.answer);
-        break;
-      case 'next_turn':
-        await this.handleNextTurn(playerId);
-        break;
-      case 'ping':
-        this.send(ws, { type: 'pong' });
-        break;
+      case 'join_room':     await this.handleJoin(ws, msg.playerName); break;
+      case 'webrtc_signal': this.handleSignal(playerId, msg.targetId, msg.signalData); break;
+      case 'start_game':    await this.handleStartGame(); break;
+      case 'guess_letter':  await this.handleGuessLetter(playerId, msg.letter); break;
+      case 'speak_log':     await this.handleSpeakLog(playerId, msg.text); break;
+      case 'give_hint':     await this.handleGiveHint(playerId); break;
+      case 'ping':          this.send(ws, { type: 'pong' }); break;
     }
   }
 
@@ -109,156 +101,187 @@ export class GameRoom implements DurableObject {
       this.send(ws, { type: 'error', message: 'Game already in progress' });
       return;
     }
-
     const playerId = crypto.randomUUID();
     ws.serializeAttachment({ playerId });
-
-    const player: Player = {
-      id: playerId,
-      name: playerName.trim().slice(0, 20),
-      role: 'guesser',
-      score: 0,
-      isConnected: true,
-    };
+    const player: Player = { id: playerId, name: playerName.trim().slice(0, 20), role: 'guesser', score: 0, isConnected: true };
     this.gameState.players.push(player);
-
-    // saveAndBroadcast sends room_state to every connected player including the one who just joined
     await this.saveAndBroadcast();
   }
 
   private handleSignal(fromId: string, targetId: string, signalData: unknown): void {
     for (const ws of this.state.getWebSockets()) {
       const { playerId } = (ws.deserializeAttachment() ?? { playerId: '' }) as WsAttachment;
-      if (playerId === targetId) {
-        this.send(ws, { type: 'webrtc_signal', fromId, signalData });
-        break;
-      }
+      if (playerId === targetId) { this.send(ws, { type: 'webrtc_signal', fromId, signalData }); break; }
     }
   }
 
-  private async handleStartGame(_requesterId: string): Promise<void> {
+  private async handleStartGame(): Promise<void> {
     if (this.gameState.status !== 'lobby') return;
     const connected = this.gameState.players.filter(p => p.isConnected);
     if (connected.length < 2) return;
 
-    const giverIdx = Math.floor(Math.random() * connected.length);
-    connected.forEach((p, i) => { p.role = i === giverIdx ? 'giver' : 'guesser'; });
+    // Random word master
+    const masterIdx = Math.floor(Math.random() * connected.length);
+    connected.forEach((p, i) => { p.role = i === masterIdx ? 'word_master' : 'guesser'; });
+    const master = connected[masterIdx];
+    this.gameState.wordMasterId = master.id;
 
-    const giver = connected[giverIdx];
-    this.gameState.giverId = giver.id;
-    this.gameState.currentGuesserId = connected.find(p => p.role === 'guesser')?.id ?? null;
-    this.gameState.secretWord = await generateSecretWord(this.env.GEMINI_API_KEY);
+    // Get word
+    const word = await generateSecretWord(this.env.GEMINI_API_KEY);
+    this.gameState.secretWord = word.toLowerCase().replace(/[^a-z]/g, '');
+    this.gameState.wordLength = this.gameState.secretWord.length;
     this.gameState.status = 'playing';
-    this.gameState.questionsLeft = 20;
-    this.gameState.questionLog = [];
-    this.gameState.aiEnabled = Boolean(this.env.GEMINI_API_KEY);
+    this.gameState.guessedLetters = [];
+    this.gameState.wrongLetters = [];
+    this.gameState.hintsUsed = 0;
+    this.gameState.speakLog = [];
+    this.gameState.winnerTeam = null;
 
     await this.state.storage.put('gameState', this.gameState);
 
-    // Send everyone room_state, then send the secret word only to the giver
+    // Broadcast — hide word from guessers
     const publicState = { ...this.gameState, secretWord: null };
     for (const ws of this.state.getWebSockets()) {
       const { playerId } = (ws.deserializeAttachment() ?? { playerId: '' }) as WsAttachment;
       if (!playerId) continue;
       this.send(ws, { type: 'room_state', state: publicState, yourPlayerId: playerId });
-      if (playerId === giver.id) {
+      if (playerId === master.id) {
         this.send(ws, { type: 'secret_word', word: this.gameState.secretWord! });
       }
     }
 
     await this.env.DB.prepare(
       `INSERT OR REPLACE INTO room_sessions (room_id, secret_word) VALUES (?, ?)`
-    ).bind(this.gameState.roomId, this.gameState.secretWord).run();
+    ).bind(this.gameState.roomId, this.gameState.secretWord).run().catch(() => {});
   }
 
-  private handleGiverAnswer(playerId: string, answer: string): void {
+  private async handleGuessLetter(playerId: string, letter: string): Promise<void> {
     if (this.gameState.status !== 'playing') return;
-    if (this.gameState.giverId !== playerId) return;
-    if (!answer.trim()) return;
-    const player = this.gameState.players.find(p => p.id === playerId);
-    if (!player) return;
-    this.broadcastAll({ type: 'giver_answer', playerName: player.name, answer: answer.trim() });
+    // Word master cannot guess
+    if (this.gameState.wordMasterId === playerId) return;
+
+    const l = letter.toLowerCase();
+    if (!/^[a-z]$/.test(l)) return;
+    if (this.gameState.guessedLetters.includes(l)) return;
+
+    const word = this.gameState.secretWord ?? '';
+    const correct = word.includes(l);
+    this.gameState.guessedLetters.push(l);
+    if (!correct) this.gameState.wrongLetters.push(l);
+
+    const player = this.gameState.players.find(p => p.id === playerId)!;
+    if (correct) player.score += 1;
+
+    this.broadcastAll({
+      type: 'letter_result',
+      letter: l,
+      correct,
+      guessedLetters: this.gameState.guessedLetters,
+      wrongLetters: this.gameState.wrongLetters,
+      playerId,
+      playerName: player.name,
+    });
+
+    // Check win: all letters guessed
+    const allGuessed = word.split('').every(c => this.gameState.guessedLetters.includes(c));
+    if (allGuessed) {
+      await this.endGame('guessers');
+      return;
+    }
+
+    // Check lose: 6 wrong guesses
+    if (this.gameState.wrongLetters.length >= this.gameState.maxWrong) {
+      await this.endGame('master');
+      return;
+    }
+
+    await this.saveState();
   }
 
-  private async handleAskQuestion(playerId: string, text: string): Promise<void> {
+  private async handleGiveHint(playerId: string): Promise<void> {
     if (this.gameState.status !== 'playing') return;
-    if (this.gameState.currentGuesserId !== playerId) return;
+    if (this.gameState.wordMasterId !== playerId) return;
+    if (this.gameState.hintsUsed >= 3) return; // max 3 hints
+
+    const word = this.gameState.secretWord ?? '';
+    // Pick a random unrevealed letter to hint
+    const unrevealed = word.split('').filter(
+      (l, i) => word.indexOf(l) === i && !this.gameState.guessedLetters.includes(l)
+    );
+    if (unrevealed.length === 0) return;
+
+    const hintLetter = unrevealed[Math.floor(Math.random() * unrevealed.length)];
+    this.gameState.hintsUsed += 1;
+    this.gameState.guessedLetters.push(hintLetter);
+
+    this.broadcastAll({
+      type: 'hint_given',
+      letter: hintLetter,
+      hintsUsed: this.gameState.hintsUsed,
+    });
+
+    // Check if hint completed the word
+    const allGuessed = word.split('').every(c => this.gameState.guessedLetters.includes(c));
+    if (allGuessed) {
+      await this.endGame('guessers');
+      return;
+    }
+
+    await this.saveState();
+  }
+
+  private async handleSpeakLog(playerId: string, text: string): Promise<void> {
+    if (this.gameState.status !== 'playing') return;
     if (!text.trim()) return;
 
     const player = this.gameState.players.find(p => p.id === playerId);
     if (!player) return;
 
-    const trimmed = text.trim();
+    const words = scoreWords(text);
+    const score = words.length;
+    player.score += score;
 
-    if (this.gameState.aiEnabled) {
-      const result = await evaluateQuestion(this.env.GEMINI_API_KEY, trimmed);
-      player.score += result.score;
-      this.gameState.questionLog.push({ playerName: player.name, playerId, question: trimmed, score: result.score, feedback: result.feedback, highlightedWords: result.highlightedWords });
-      this.broadcastAll({ type: 'ai_evaluation', playerId, playerName: player.name, question: trimmed, score: result.score, feedback: result.feedback, highlightedWords: result.highlightedWords });
-      await this.env.DB.prepare(
-        `INSERT INTO game_logs (room_id, secret_word, player_name, question, score, feedback) VALUES (?, ?, ?, ?, ?, ?)`
-      ).bind(this.gameState.roomId, this.gameState.secretWord ?? '', player.name, trimmed, result.score, result.feedback).run();
-    } else {
-      this.gameState.questionLog.push({ playerName: player.name, playerId, question: trimmed, score: 0, feedback: '', highlightedWords: [] });
-      this.broadcastAll({ type: 'ai_evaluation', playerId, playerName: player.name, question: trimmed, score: 0, feedback: '', highlightedWords: [] });
-    }
-
-    const secretLower = this.gameState.secretWord?.toLowerCase() ?? '';
-    const questionLower = trimmed.toLowerCase();
-    if (secretLower && (questionLower.includes(`is it ${secretLower}`) || questionLower.includes(`is it a ${secretLower}`) || questionLower === secretLower)) {
-      await this.endGame(player.name);
-      return;
-    }
-
+    const entry: SpeakEntry = {
+      playerId,
+      playerName: player.name,
+      text: text.trim(),
+      words,
+      score,
+      timestamp: Date.now(),
+    };
+    this.gameState.speakLog.push(entry);
+    this.broadcastAll({ type: 'speak_logged', entry });
     await this.saveState();
   }
 
-  private async handleNextTurn(playerId: string): Promise<void> {
-    if (this.gameState.status !== 'playing') return;
-    if (this.gameState.giverId !== playerId) return;
-
-    this.gameState.questionsLeft -= 1;
-    if (this.gameState.questionsLeft <= 0) {
-      await this.endGame(null);
-      return;
-    }
-
-    const guessers = this.gameState.players.filter(p => p.role === 'guesser' && p.isConnected);
-    if (guessers.length === 0) return;
-
-    const currentIdx = guessers.findIndex(p => p.id === this.gameState.currentGuesserId);
-    this.gameState.currentGuesserId = guessers[(currentIdx + 1) % guessers.length].id;
-
-    this.broadcastAll({ type: 'turn_update', currentGuesserId: this.gameState.currentGuesserId, questionsLeft: this.gameState.questionsLeft });
-    await this.saveState();
-  }
-
-  private async endGame(winnerName: string | null): Promise<void> {
+  private async endGame(winnerTeam: 'guessers' | 'master'): Promise<void> {
     this.gameState.status = 'finished';
-    this.gameState.winnerName = winnerName;
+    this.gameState.winnerTeam = winnerTeam;
 
     const scores = this.gameState.players
-      .filter(p => p.role === 'guesser')
       .map(p => ({ name: p.name, score: p.score }))
       .sort((a, b) => b.score - a.score);
 
-    this.broadcastAll({ type: 'game_over', winnerName, secretWord: this.gameState.secretWord ?? '', scores });
+    this.broadcastAll({
+      type: 'game_over',
+      winnerTeam,
+      secretWord: this.gameState.secretWord ?? '',
+      scores,
+    });
 
     await this.env.DB.prepare(
       `UPDATE room_sessions SET winner_name = ?, ended_at = CURRENT_TIMESTAMP WHERE room_id = ?`
-    ).bind(winnerName, this.gameState.roomId).run();
+    ).bind(winnerTeam === 'guessers' ? 'guessers_team' : 'word_master', this.gameState.roomId).run().catch(() => {});
 
     await this.saveState();
   }
 
   private send(ws: WebSocket, msg: ServerMessage): void {
-    try { ws.send(JSON.stringify(msg)); } catch { /* connection closed */ }
+    try { ws.send(JSON.stringify(msg)); } catch { /* closed */ }
   }
 
   private broadcastAll(msg: ServerMessage): void {
-    for (const ws of this.state.getWebSockets()) {
-      this.send(ws, msg);
-    }
+    for (const ws of this.state.getWebSockets()) this.send(ws, msg);
   }
 
   private async saveState(): Promise<void> {
@@ -270,9 +293,7 @@ export class GameRoom implements DurableObject {
     const state = { ...this.gameState, secretWord: null };
     for (const ws of this.state.getWebSockets()) {
       const { playerId } = (ws.deserializeAttachment() ?? { playerId: '' }) as WsAttachment;
-      if (playerId) {
-        this.send(ws, { type: 'room_state', state, yourPlayerId: playerId });
-      }
+      if (playerId) this.send(ws, { type: 'room_state', state, yourPlayerId: playerId });
     }
   }
 }

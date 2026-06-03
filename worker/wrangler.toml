@@ -1,4 +1,5 @@
 name = "englishgame"
+account_id = "a0f762fdb5455480c7ca80dd79cbbbb7"
 main = "src/index.ts"
 compatibility_date = "2024-12-30"
 compatibility_flags = ["nodejs_compat"]

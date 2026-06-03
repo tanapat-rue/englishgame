@@ -1,4 +1,4 @@
-export type PlayerRole = 'giver' | 'guesser' | 'spectator';
+export type PlayerRole = 'word_master' | 'guesser';
 export type GameStatus = 'lobby' | 'playing' | 'finished';
 
 export interface Player {
@@ -14,31 +14,33 @@ export interface GameState {
   status: GameStatus;
   players: Player[];
   secretWord: string | null;
-  giverId: string | null;
-  currentGuesserId: string | null;
-  questionsLeft: number;
-  questionLog: QuestionLog[];
-  winnerName: string | null;
-  aiEnabled: boolean;
+  wordLength: number;
+  wordMasterId: string | null;
+  guessedLetters: string[];
+  wrongLetters: string[];
+  maxWrong: number;
+  hintsUsed: number;
+  speakLog: SpeakEntry[];
+  winnerTeam: 'guessers' | 'master' | null;
 }
 
-export interface QuestionLog {
-  playerName: string;
+export interface SpeakEntry {
   playerId: string;
-  question: string;
+  playerName: string;
+  text: string;
+  words: string[];
   score: number;
-  feedback: string;
-  highlightedWords: string[];
+  timestamp: number;
 }
 
 export type ServerMessage =
   | { type: 'room_state'; state: GameState; yourPlayerId: string }
   | { type: 'webrtc_signal'; fromId: string; signalData: unknown }
   | { type: 'secret_word'; word: string }
-  | { type: 'ai_evaluation'; playerId: string; playerName: string; question: string; score: number; feedback: string; highlightedWords: string[] }
-  | { type: 'giver_answer'; playerName: string; answer: string }
-  | { type: 'turn_update'; currentGuesserId: string | null; questionsLeft: number }
-  | { type: 'game_over'; winnerName: string | null; secretWord: string; scores: Array<{ name: string; score: number }> }
+  | { type: 'letter_result'; letter: string; correct: boolean; guessedLetters: string[]; wrongLetters: string[]; playerId: string; playerName: string }
+  | { type: 'hint_given'; letter: string; hintsUsed: number }
+  | { type: 'speak_logged'; entry: SpeakEntry }
+  | { type: 'game_over'; winnerTeam: 'guessers' | 'master'; secretWord: string; scores: Array<{ name: string; score: number }> }
   | { type: 'error'; message: string }
   | { type: 'pong' };
 
@@ -46,11 +48,12 @@ export type ClientMessage =
   | { type: 'join_room'; playerName: string }
   | { type: 'webrtc_signal'; targetId: string; signalData: unknown }
   | { type: 'start_game' }
-  | { type: 'ask_question'; text: string }
-  | { type: 'giver_answer'; answer: string }
-  | { type: 'next_turn' }
+  | { type: 'guess_letter'; letter: string }
+  | { type: 'speak_log'; text: string }
+  | { type: 'give_hint' }
   | { type: 'ping' };
 
+// Keep ChatEntry for compatibility but it's no longer used in hangman
 export interface ChatEntry {
   id: string;
   playerName: string;
