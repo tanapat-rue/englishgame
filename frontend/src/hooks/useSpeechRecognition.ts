@@ -32,9 +32,12 @@ export function useSpeechRecognition() {
   const [transcript, setTranscript] = useState('');
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
-  // Accumulate all final segments — fixes the "single word" bug where
-  // operator precedence made `prev + final || interim` reset prev each time
+
+  // Both refs stay in sync — finalAccumRef holds committed final text,
+  // interimRef holds the current in-progress segment.
+  // stopListening reads refs directly so it's never stale.
   const finalAccumRef = useRef('');
+  const interimRef = useRef('');
 
   const isSupported = typeof window !== 'undefined' &&
     ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
@@ -42,6 +45,7 @@ export function useSpeechRecognition() {
   const startListening = useCallback(() => {
     if (!isSupported) return;
     finalAccumRef.current = '';
+    interimRef.current = '';
     setTranscript('');
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -52,20 +56,36 @@ export function useSpeechRecognition() {
 
     recognition.onresult = (ev) => {
       let newFinal = '';
-      let interim = '';
+      let newInterim = '';
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const text = ev.results[i][0].transcript;
         if (ev.results[i].isFinal) newFinal += text;
-        else interim += text;
+        else newInterim += text;
       }
-      if (newFinal) finalAccumRef.current += (finalAccumRef.current ? ' ' : '') + newFinal.trim();
-      // Show final + current interim in the preview
-      const display = finalAccumRef.current + (interim ? ' ' + interim : '');
+      if (newFinal) {
+        finalAccumRef.current = (finalAccumRef.current
+          ? finalAccumRef.current + ' ' + newFinal.trim()
+          : newFinal.trim());
+        interimRef.current = '';
+      } else {
+        interimRef.current = newInterim;
+      }
+      const display = finalAccumRef.current + (interimRef.current ? ' ' + interimRef.current : '');
       setTranscript(display.trim());
     };
 
     recognition.onerror = () => setIsListening(false);
-    recognition.onend = () => setIsListening(false);
+    recognition.onend = () => {
+      setIsListening(false);
+      // Promote any remaining interim to final on end
+      if (interimRef.current.trim()) {
+        finalAccumRef.current = (finalAccumRef.current
+          ? finalAccumRef.current + ' ' + interimRef.current.trim()
+          : interimRef.current.trim());
+        interimRef.current = '';
+        setTranscript(finalAccumRef.current);
+      }
+    };
 
     recognitionRef.current = recognition;
     recognition.start();
@@ -76,10 +96,18 @@ export function useSpeechRecognition() {
     recognitionRef.current?.stop();
     recognitionRef.current = null;
     setIsListening(false);
-    // Return the full accumulated final transcript
-    const result = finalAccumRef.current || transcript;
-    return result.trim();
-  }, [transcript]);
+    // Promote any interim that hasn't been finalised yet
+    const interim = interimRef.current.trim();
+    if (interim) {
+      finalAccumRef.current = (finalAccumRef.current
+        ? finalAccumRef.current + ' ' + interim
+        : interim);
+      interimRef.current = '';
+    }
+    const result = finalAccumRef.current.trim();
+    setTranscript(result);
+    return result;
+  }, []); // no deps — reads refs directly, always current
 
   return { transcript, isListening, isSupported, startListening, stopListening };
 }
