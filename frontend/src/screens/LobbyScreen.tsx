@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { ClientMessage, GameState, ServerMessage } from '../types';
 
 interface SharedGameState {
@@ -18,24 +18,33 @@ interface Props {
 
 export default function LobbyScreen({ roomId, playerName, shared, send, connected, onRegisterHandler, onLeave }: Props) {
   const { gameState, myId } = shared;
+  const [llmAvailable, setLlmAvailable] = useState(false);
+  const [llmScoring, setLlmScoring] = useState(true);
 
-  // Register a no-op handler; App.tsx already handles room_state and screen transitions
   useEffect(() => {
     onRegisterHandler(() => {});
   }, [onRegisterHandler]);
 
-  // Send join_room as soon as the WS is connected
   useEffect(() => {
-    if (connected) {
-      send({ type: 'join_room', playerName });
-    }
-    // Only run when connection first comes up — playerName won't change
+    if (connected) send({ type: 'join_room', playerName });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected]);
 
+  // Fetch server capabilities to know if LLM scoring is available
+  useEffect(() => {
+    const base = import.meta.env.DEV ? 'http://localhost:8787' : (import.meta.env.VITE_WORKER_URL ?? '');
+    fetch(`${base}/api/config`)
+      .then(r => r.json())
+      .then((d: { llmAvailable?: boolean }) => {
+        setLlmAvailable(Boolean(d.llmAvailable));
+        setLlmScoring(Boolean(d.llmAvailable)); // default on if available
+      })
+      .catch(() => {});
+  }, []);
+
   const handleStartGame = () => {
     const connectedCount = gameState?.players.filter(p => p.isConnected).length ?? 0;
-    if (connectedCount >= 2) send({ type: 'start_game' });
+    if (connectedCount >= 2) send({ type: 'start_game', llmScoring: llmAvailable && llmScoring });
   };
 
   const connectedPlayers = gameState?.players.filter(p => p.isConnected) ?? [];
@@ -65,9 +74,9 @@ export default function LobbyScreen({ roomId, playerName, shared, send, connecte
               Players ({connectedPlayers.length}/6)
             </p>
             {connectedPlayers.map((p, i) => (
-              <div key={p.id} className="flex items-center gap-3 bg-white/5 border border-white/10 rounded-2xl px-4 py-3 animate-[fadeIn_0.3s_ease-in]"
+              <div key={p.id} className="flex items-center gap-3 bg-white/5 border border-white/10 rounded-2xl px-4 py-3"
                 style={{ animationDelay: `${i * 100}ms` }}>
-                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center text-sm font-bold text-white shadow-lg shadow-indigo-500/20">
+                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center text-sm font-bold text-white">
                   {p.name.charAt(0).toUpperCase()}
                 </div>
                 <span className="text-white font-semibold flex-1">{p.name}</span>
@@ -88,6 +97,36 @@ export default function LobbyScreen({ roomId, playerName, shared, send, connecte
                   {connected ? 'Waiting for players...' : 'Connecting...'}
                 </p>
               </div>
+            )}
+          </div>
+
+          {/* AI Scoring setting */}
+          <div className={`flex items-center justify-between px-4 py-3 rounded-2xl border ${
+            llmAvailable ? 'bg-indigo-500/10 border-indigo-500/30' : 'bg-white/5 border-white/10'
+          }`}>
+            <div>
+              <p className={`text-sm font-semibold ${llmAvailable ? 'text-white' : 'text-gray-500'}`}>
+                🤖 AI Word Scoring
+              </p>
+              <p className={`text-xs mt-0.5 ${llmAvailable ? 'text-gray-400' : 'text-gray-600'}`}>
+                {llmAvailable
+                  ? 'Words scored by CEFR difficulty (1–5 pts)'
+                  : 'Not available — no API key configured'}
+              </p>
+            </div>
+            {llmAvailable ? (
+              <button
+                onClick={() => setLlmScoring(v => !v)}
+                className={`relative w-12 h-6 rounded-full transition-colors duration-200 ${
+                  llmScoring ? 'bg-indigo-500' : 'bg-gray-700'
+                }`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform duration-200 ${
+                  llmScoring ? 'translate-x-6' : 'translate-x-0'
+                }`} />
+              </button>
+            ) : (
+              <span className="text-gray-700 text-xs">OFF</span>
             )}
           </div>
 

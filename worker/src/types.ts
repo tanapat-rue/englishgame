@@ -7,15 +7,21 @@ export interface Player {
   isConnected: boolean;
 }
 
+export interface WordScore {
+  word: string;
+  points: number; // 1 (flat) or 1–5 (CEFR difficulty via LLM)
+}
+
 export interface GameState {
   roomId: string;
   status: GameStatus;
   players: Player[];
   wordLength: number;
-  maskedWord: string[];  // e.g. ['_','p','p','_','e'] — revealed letters, '_' for hidden
+  maskedWord: string[];
   guessedLetters: string[];
   wrongLetters: string[];
   maxWrong: number;
+  llmScoring: boolean;
   speakLog: SpeakEntry[];
   winner: 'players' | 'house' | null;
 }
@@ -23,9 +29,8 @@ export interface GameState {
 export interface SpeakEntry {
   playerId: string;
   playerName: string;
-  text: string;
-  words: string[];
-  score: number;
+  words: WordScore[];
+  totalScore: number;
   timestamp: number;
 }
 
@@ -33,7 +38,7 @@ export interface SpeakEntry {
 export type ClientMessage =
   | { type: 'join_room'; playerName: string }
   | { type: 'webrtc_signal'; targetId: string; signalData: unknown }
-  | { type: 'start_game' }
+  | { type: 'start_game'; llmScoring: boolean }
   | { type: 'guess_letter'; letter: string }
   | { type: 'speak_log'; text: string }
   | { type: 'ping' };

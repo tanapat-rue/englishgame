@@ -1,5 +1,5 @@
-import { GameState, Player, ClientMessage, ServerMessage, SpeakEntry } from './types';
-import { generateSecretWord } from './gemini';
+import { GameState, Player, ClientMessage, ServerMessage, SpeakEntry, WordScore } from './types';
+import { generateSecretWord, scoreWordDifficulty } from './gemini';
 
 export interface Env {
   DB: D1Database;
@@ -16,7 +16,7 @@ function getMaskedWord(word: string, guessedLetters: string[]): string[] {
   return word.split('').map(l => guessedLetters.includes(l) ? l : '_');
 }
 
-function scoreWords(text: string): string[] {
+function extractWords(text: string): string[] {
   const words = text.toLowerCase()
     .replace(/[^a-z\s]/g, '')
     .split(/\s+/)
@@ -42,6 +42,7 @@ export class GameRoom implements DurableObject {
       guessedLetters: [],
       wrongLetters: [],
       maxWrong: 6,
+      llmScoring: false,
       speakLog: [],
       winner: null,
     };
@@ -83,7 +84,7 @@ export class GameRoom implements DurableObject {
     switch (msg.type) {
       case 'join_room':     await this.handleJoin(ws, msg.playerName); break;
       case 'webrtc_signal': this.handleSignal(playerId, msg.targetId, msg.signalData); break;
-      case 'start_game':    await this.handleStartGame(); break;
+      case 'start_game':    await this.handleStartGame(msg.llmScoring); break;
       case 'guess_letter':  await this.handleGuessLetter(playerId, msg.letter); break;
       case 'speak_log':     await this.handleSpeakLog(playerId, msg.text); break;
       case 'ping':          this.send(ws, { type: 'pong' }); break;
@@ -119,13 +120,15 @@ export class GameRoom implements DurableObject {
     }
   }
 
-  private async handleStartGame(): Promise<void> {
+  private async handleStartGame(llmScoring: boolean): Promise<void> {
     if (this.gameState.status !== 'lobby') return;
     if (this.gameState.players.filter(p => p.isConnected).length < 2) return;
 
     this.secretWord = await generateSecretWord(this.env.GEMINI_API_KEY);
     this.secretWord = this.secretWord.toLowerCase().replace(/[^a-z]/g, '');
 
+    // Only enable LLM scoring if caller requested it AND the key is available
+    this.gameState.llmScoring = llmScoring && Boolean(this.env.GEMINI_API_KEY);
     this.gameState.status = 'playing';
     this.gameState.wordLength = this.secretWord.length;
     this.gameState.guessedLetters = [];
@@ -177,11 +180,28 @@ export class GameRoom implements DurableObject {
     const player = this.gameState.players.find(p => p.id === playerId);
     if (!player) return;
 
-    const words = scoreWords(text);
-    const score = words.length;
-    player.score += score;
+    const wordList = extractWords(text);
+    if (!wordList.length) return;
 
-    const entry: SpeakEntry = { playerId, playerName: player.name, text: text.trim(), words, score, timestamp: Date.now() };
+    let wordScores: WordScore[];
+
+    if (this.gameState.llmScoring) {
+      const difficultyMap = await scoreWordDifficulty(this.env.GEMINI_API_KEY, wordList);
+      wordScores = wordList.map(w => ({ word: w, points: difficultyMap[w] ?? 1 }));
+    } else {
+      wordScores = wordList.map(w => ({ word: w, points: 1 }));
+    }
+
+    const totalScore = wordScores.reduce((sum, ws) => sum + ws.points, 0);
+    player.score += totalScore;
+
+    const entry: SpeakEntry = {
+      playerId,
+      playerName: player.name,
+      words: wordScores,
+      totalScore,
+      timestamp: Date.now(),
+    };
     this.gameState.speakLog.push(entry);
     this.broadcastAll(() => ({ type: 'speak_logged' as const, entry }));
     await this.saveState();
@@ -190,7 +210,7 @@ export class GameRoom implements DurableObject {
   private async endGame(winner: 'players' | 'house'): Promise<void> {
     this.gameState.status = 'finished';
     this.gameState.winner = winner;
-    this.gameState.maskedWord = this.secretWord.split(''); // reveal full word
+    this.gameState.maskedWord = this.secretWord.split('');
     const scores = this.gameState.players.map(p => ({ name: p.name, score: p.score })).sort((a, b) => b.score - a.score);
     this.broadcastAll(() => ({ type: 'game_over' as const, winner, secretWord: this.secretWord, scores }));
     await this.saveState();

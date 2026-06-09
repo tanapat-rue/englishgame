@@ -40,6 +40,49 @@ export interface EvaluationResult {
   highlightedWords: string[];
 }
 
+// Score words by CEFR difficulty: A1=1, A2=2, B1=3, B2=4, C1/C2=5
+// Sends all words in a single API call to minimise token usage.
+export async function scoreWordDifficulty(apiKey: string, words: string[]): Promise<Record<string, number>> {
+  if (!words.length) return {};
+  if (!apiKey) return Object.fromEntries(words.map(w => [w, 1]));
+
+  const prompt = {
+    contents: [{
+      parts: [{
+        text: `You are a CEFR English level expert. Score each of the following words by difficulty:
+A1=1, A2=2, B1=3, B2=4, C1 or C2=5.
+
+Words: ${words.join(', ')}
+
+Return ONLY valid JSON (no markdown) with this exact format:
+{"word1": 2, "word2": 4, ...}
+Include every word. Use 1-5 only.`
+      }]
+    }]
+  };
+
+  try {
+    const resp = await fetch(`${GEMINI_API_BASE}?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(prompt),
+    });
+    if (!resp.ok) throw new Error(`Gemini word score failed: ${resp.status}`);
+    const data = await resp.json() as { candidates: Array<{ content: { parts: Array<{ text: string }> } }> };
+    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+    const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const parsed = JSON.parse(cleaned) as Record<string, unknown>;
+    const result: Record<string, number> = {};
+    for (const word of words) {
+      const v = parsed[word];
+      result[word] = typeof v === 'number' ? Math.max(1, Math.min(5, Math.round(v))) : 1;
+    }
+    return result;
+  } catch {
+    return Object.fromEntries(words.map(w => [w, 1]));
+  }
+}
+
 export async function evaluateQuestion(apiKey: string, question: string): Promise<EvaluationResult> {
   const prompt = {
     contents: [{

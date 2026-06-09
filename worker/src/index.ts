@@ -61,6 +61,14 @@ export default {
       }
     }
 
+    // Route: GET /api/config — exposes server capabilities (no secrets)
+    if (url.pathname === '/api/config') {
+      return Response.json(
+        { llmAvailable: Boolean(env.GEMINI_API_KEY) },
+        { headers: corsHeaders }
+      );
+    }
+
     // Route: GET /api/health
     if (url.pathname === '/api/health') {
       return Response.json({ ok: true }, { headers: corsHeaders });

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { ClientMessage, GameState, ServerMessage, SpeakEntry } from '../types';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ClientMessage, GameState, ServerMessage, SpeakEntry, WordScore } from '../types';
 import { useWebRTC } from '../hooks/useWebRTC';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 
@@ -139,10 +139,6 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
     });
   }, [streamReady, gameState, myId, initiateConnectionTo]);
 
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [speakLog]);
-
   const wrongCount = wrongLetters.length;
   const livesLeft = (gameState?.maxWrong ?? 6) - wrongCount;
   const myScore = gameState?.players.find(p => p.id === myId)?.score ?? 0;
@@ -202,6 +198,14 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
               ❤️
             </span>
           ))}
+        </div>
+        {/* Scoring mode badge */}
+        <div className={`px-2 py-1 rounded-full text-[10px] font-bold ${
+          gameState?.llmScoring
+            ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+            : 'bg-gray-800 text-gray-500 border border-gray-700'
+        }`}>
+          {gameState?.llmScoring ? '🤖 AI Scoring' : '📝 Basic Scoring'}
         </div>
         {/* My score */}
         <div className="text-right">
@@ -295,38 +299,22 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
         ))}
       </div>
 
-      {/* ═══ VOICE ═══ */}
-      <div className="flex-1 flex flex-col min-h-0 px-3 pb-3 gap-1.5">
-        {/* Log */}
-        <div className="flex-1 overflow-y-auto space-y-1.5 min-h-0">
-          {speakLog.length === 0
-            ? <p className="text-gray-700 text-xs text-center pt-2">Hold to talk — discuss with your team!</p>
-            : speakLog.map((entry, i) => (
-                <div key={i} className={`rounded-xl px-3 py-2 ${entry.playerName === playerName ? 'bg-indigo-950/70 border border-indigo-800/40 ml-4' : 'bg-gray-900 mr-4'}`}>
-                  <div className="flex justify-between items-center mb-0.5">
-                    <span className="text-gray-500 text-[10px] font-semibold">{entry.playerName === playerName ? 'You' : entry.playerName}</span>
-                    <span className="text-yellow-500 text-[10px] font-bold">+{entry.score}pts</span>
-                  </div>
-                  <p className="text-white text-sm">{entry.text}</p>
-                  {entry.words.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {entry.words.map(w => (
-                        <span key={w} className="text-emerald-400/60 text-[10px] bg-emerald-900/20 px-1.5 rounded-full">{w}</span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))
-          }
+      {/* ═══ WORD BOARD + TALK ═══ */}
+      <div className="flex-1 flex flex-col min-h-0 px-3 pb-3 gap-2">
+        {/* Word board — one row per player, all their scored words */}
+        <div className="flex-1 overflow-y-auto min-h-0">
+          <WordBoard speakLog={speakLog} myPlayerName={playerName} llmScoring={gameState?.llmScoring ?? false} />
           <div ref={logEndRef} />
         </div>
 
+        {/* Live transcript preview while holding */}
         {transcript && (
-          <div className="flex-shrink-0 bg-white/5 rounded-xl px-3 py-2 text-white text-sm border border-white/10">
+          <div className="flex-shrink-0 bg-white/5 rounded-xl px-3 py-2 text-white text-sm border border-white/10 italic">
             {transcript}
           </div>
         )}
 
+        {/* Hold to Talk */}
         <button
           onPointerDown={handlePressStart}
           onPointerUp={handlePressEnd}
@@ -370,6 +358,92 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
           {debugLog.slice(-10).map((l, i) => <p key={i}>{l}</p>)}
         </div>
       </details>
+    </div>
+  );
+}
+
+// ═══ WORD BOARD ═══════════════════════════════════════════════════════════════
+
+const DIFFICULTY_STYLE: Record<number, string> = {
+  1: 'bg-gray-700/60 text-gray-300 border-gray-600/40',
+  2: 'bg-blue-900/40 text-blue-300 border-blue-700/40',
+  3: 'bg-green-900/40 text-green-300 border-green-700/40',
+  4: 'bg-yellow-900/40 text-yellow-300 border-yellow-700/40',
+  5: 'bg-red-900/40 text-red-300 border-red-700/40',
+};
+
+function WordChip({ ws, llmScoring }: { ws: WordScore; llmScoring: boolean }) {
+  const style = DIFFICULTY_STYLE[ws.points] ?? DIFFICULTY_STYLE[1];
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-xs font-semibold ${style}`}>
+      {ws.word}
+      <span className="font-black opacity-80">×{ws.points}</span>
+    </span>
+  );
+}
+
+function WordBoard({ speakLog, myPlayerName, llmScoring }: {
+  speakLog: SpeakEntry[];
+  myPlayerName: string;
+  llmScoring: boolean;
+}) {
+  // Aggregate all words per player, accumulate total score
+  const playerMap = useMemo(() => {
+    const map = new Map<string, { name: string; total: number; words: WordScore[] }>();
+    for (const entry of speakLog) {
+      const existing = map.get(entry.playerId);
+      if (existing) {
+        existing.total += entry.totalScore;
+        existing.words.push(...entry.words);
+      } else {
+        map.set(entry.playerId, {
+          name: entry.playerName,
+          total: entry.totalScore,
+          words: [...entry.words],
+        });
+      }
+    }
+    return [...map.values()].sort((a, b) => b.total - a.total);
+  }, [speakLog]);
+
+  if (playerMap.length === 0) {
+    return (
+      <p className="text-gray-700 text-xs text-center pt-3">
+        Hold to talk — scored words will appear here
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-2 pt-1">
+      {llmScoring && (
+        <div className="flex gap-2 flex-wrap px-1 mb-1">
+          {[1,2,3,4,5].map(n => (
+            <span key={n} className={`text-[9px] px-1.5 py-0.5 rounded-full border ${DIFFICULTY_STYLE[n]}`}>
+              {['A1','A2','B1','B2','C1'][n-1]} ×{n}
+            </span>
+          ))}
+        </div>
+      )}
+      {playerMap.map(player => (
+        <div key={player.name} className={`rounded-xl px-3 py-2 ${
+          player.name === myPlayerName
+            ? 'bg-indigo-950/60 border border-indigo-800/40'
+            : 'bg-gray-900/80 border border-gray-800/40'
+        }`}>
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-gray-400 text-[11px] font-bold">
+              {player.name === myPlayerName ? 'You' : player.name}
+            </span>
+            <span className="text-yellow-400 text-[11px] font-black">{player.total} pts</span>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {player.words.map((ws, i) => (
+              <WordChip key={`${ws.word}-${i}`} ws={ws} llmScoring={llmScoring} />
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
