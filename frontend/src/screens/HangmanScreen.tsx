@@ -307,13 +307,6 @@ export default function HangmanScreen({ playerName, shared, send, connected, onR
           <div ref={logEndRef} />
         </div>
 
-        {/* Live transcript preview while holding */}
-        {transcript && (
-          <div className="flex-shrink-0 bg-white/5 rounded-xl px-3 py-2 text-white text-sm border border-white/10 italic">
-            {transcript}
-          </div>
-        )}
-
         {/* Hold to Talk */}
         <button
           onPointerDown={handlePressStart}
@@ -372,12 +365,13 @@ const DIFFICULTY_STYLE: Record<number, string> = {
   5: 'bg-red-900/40 text-red-300 border-red-700/40',
 };
 
-function WordChip({ ws, llmScoring }: { ws: WordScore; llmScoring: boolean }) {
-  const style = DIFFICULTY_STYLE[ws.points] ?? DIFFICULTY_STYLE[1];
+function WordChip({ word, points, count, llmScoring }: { word: string; points: number; count: number; llmScoring: boolean }) {
+  const style = DIFFICULTY_STYLE[points] ?? DIFFICULTY_STYLE[1];
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-xs font-semibold ${style}`}>
-      {ws.word}
-      <span className="font-black opacity-80">×{ws.points}</span>
+      {word}
+      {count > 1 && <span className="opacity-60">×{count}</span>}
+      {llmScoring && <span className="font-black opacity-80">{points}pt</span>}
     </span>
   );
 }
@@ -387,23 +381,31 @@ function WordBoard({ speakLog, myPlayerName, llmScoring }: {
   myPlayerName: string;
   llmScoring: boolean;
 }) {
-  // Aggregate all words per player, accumulate total score
+  // Aggregate all words per player — merge duplicates by accumulating count and points
   const playerMap = useMemo(() => {
-    const map = new Map<string, { name: string; total: number; words: WordScore[] }>();
+    const map = new Map<string, { name: string; total: number; wordMap: Map<string, { points: number; count: number }> }>();
     for (const entry of speakLog) {
-      const existing = map.get(entry.playerId);
-      if (existing) {
-        existing.total += entry.totalScore;
-        existing.words.push(...entry.words);
-      } else {
-        map.set(entry.playerId, {
-          name: entry.playerName,
-          total: entry.totalScore,
-          words: [...entry.words],
-        });
+      if (!map.has(entry.playerId)) {
+        map.set(entry.playerId, { name: entry.playerName, total: 0, wordMap: new Map() });
+      }
+      const player = map.get(entry.playerId)!;
+      player.total += entry.totalScore;
+      for (const ws of entry.words) {
+        const existing = player.wordMap.get(ws.word);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          player.wordMap.set(ws.word, { points: ws.points, count: 1 });
+        }
       }
     }
-    return [...map.values()].sort((a, b) => b.total - a.total);
+    return [...map.values()]
+      .sort((a, b) => b.total - a.total)
+      .map(p => ({
+        name: p.name,
+        total: p.total,
+        words: [...p.wordMap.entries()].map(([word, { points, count }]) => ({ word, points, count })),
+      }));
   }, [speakLog]);
 
   if (playerMap.length === 0) {
@@ -438,8 +440,8 @@ function WordBoard({ speakLog, myPlayerName, llmScoring }: {
             <span className="text-yellow-400 text-[11px] font-black">{player.total} pts</span>
           </div>
           <div className="flex flex-wrap gap-1">
-            {player.words.map((ws, i) => (
-              <WordChip key={`${ws.word}-${i}`} ws={ws} llmScoring={llmScoring} />
+            {player.words.map(w => (
+              <WordChip key={w.word} word={w.word} points={w.points} count={w.count} llmScoring={llmScoring} />
             ))}
           </div>
         </div>
